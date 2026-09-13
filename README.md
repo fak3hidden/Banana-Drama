@@ -38,6 +38,20 @@ Already cloned it? Run:
 git submodule update --init --recursive
 ```
 
+**Downloaded the .zip instead?** GitHub leaves `vendor\imgui` and `vendor\minhook`
+empty in those, so the build fails with "Cannot open include file: 'imgui.h'".
+Fetch the dependencies with either:
+
+```bat
+scripts\fetch-deps.bat
+```
+
+or, without git:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-deps.ps1
+```
+
 | Submodule | Version | What for |
 | --- | --- | --- |
 | `vendor/imgui` | v1.92.9b | the UI (core + `win32` and `dx11` backends) |

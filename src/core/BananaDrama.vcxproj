@@ -59,8 +59,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <OutDir>$(SolutionDir)build\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)build\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(MSBuildThisFileDirectory)..\..\build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\build\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
     <TargetName Condition="'$(Platform)'=='Win32'">BananaDrama32</TargetName>
     <TargetName Condition="'$(Platform)'=='x64'">BananaDrama</TargetName>
   </PropertyGroup>
@@ -70,7 +70,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>true</ConformanceMode>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(SolutionDir)vendor\imgui;$(SolutionDir)vendor\imgui\backends;$(SolutionDir)vendor\minhook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\vendor\imgui;$(MSBuildThisFileDirectory)..\..\vendor\imgui\backends;$(MSBuildThisFileDirectory)..\..\vendor\minhook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -138,44 +138,44 @@
 
   <!-- Dear ImGui -->
   <ItemGroup>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\imgui.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\imgui.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\imgui_draw.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\imgui_draw.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\imgui_tables.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\imgui_tables.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\imgui_widgets.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\imgui_widgets.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\imgui_demo.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\imgui_demo.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\backends\imgui_impl_win32.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\backends\imgui_impl_win32.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\imgui\backends\imgui_impl_dx11.cpp">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\imgui\backends\imgui_impl_dx11.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
   </ItemGroup>
 
   <!-- MinHook, compiled straight into the dll -->
   <ItemGroup>
-    <ClCompile Include="$(SolutionDir)vendor\minhook\src\buffer.c">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\minhook\src\buffer.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\minhook\src\hook.c">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\minhook\src\hook.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\minhook\src\trampoline.c">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\minhook\src\trampoline.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\minhook\src\hde\hde32.c">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\minhook\src\hde\hde32.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
-    <ClCompile Include="$(SolutionDir)vendor\minhook\src\hde\hde64.c">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\vendor\minhook\src\hde\hde64.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
     </ClCompile>
   </ItemGroup>
