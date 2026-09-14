@@ -99,6 +99,33 @@ src/injector/        the injector console app
 tests/json_tests.cpp unit tests for the json module (not part of the solution)
 ```
 
+## Built-in modules
+
+| Module | What it does |
+| --- | --- |
+| Overlay HUD | fps, frame time, session clock, process id |
+| Stone | boosts the stone counter when the game stores it |
+| Sandbox | one of every ImGui widget, a template for new modules |
+
+### Stone
+
+Ported from your Cheat Engine table. It scans the game module for
+
+```
+mov [r15+0x578], eax        41 89 87 78 05 00 00
+```
+
+and diverts that instruction into a small stub that adds an amount (default
+999,999) to `eax` before the store, then jumps back. Every other register and
+the flags are left alone, and the original bytes are put back the moment you
+switch the module off.
+
+- **Add on every gain** - grows the counter each time the game updates it
+- **Set to a fixed value** - pins the counter to the amount
+
+If a game update moves the instruction, the module reports "pattern not found"
+in the menu instead of crashing. It is 64-bit only.
+
 ## Adding a module
 
 1. Copy `src/core/modules/sandbox.h/.cpp` and rename the class.

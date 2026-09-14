@@ -109,6 +109,7 @@
     <ClCompile Include="modules\module_manager.cpp" />
     <ClCompile Include="modules\overlay.cpp" />
     <ClCompile Include="modules\sandbox.cpp" />
+    <ClCompile Include="modules\stone.cpp" />
     <ClCompile Include="ui\widgets.cpp" />
     <ClCompile Include="util\env.cpp" />
     <ClCompile Include="util\json.cpp" />
@@ -128,6 +129,7 @@
     <ClInclude Include="modules\module_manager.h" />
     <ClInclude Include="modules\overlay.h" />
     <ClInclude Include="modules\sandbox.h" />
+    <ClInclude Include="modules\stone.h" />
     <ClInclude Include="ui\widgets.h" />
     <ClInclude Include="util\env.h" />
     <ClInclude Include="util\json.h" />
