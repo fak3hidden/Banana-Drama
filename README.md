@@ -51,6 +51,32 @@ build\x64\Release\BananaDrama.Injector.exe   <- the injector
 
 Building **Release | Win32** gives `BananaDrama32.dll` for a 32-bit game.
 
+## The three batch files
+
+| File | What it does |
+| --- | --- |
+| `update.bat` | pulls the newest version (git pull, or re-downloads the zip over your folder) |
+| `compile.bat` | builds the dll + injector with MSBuild, no Visual Studio window |
+| `run.bat` | runs the injector (with no arguments it asks which process to use) |
+
+Double click any of them. They all live in the repository root:
+
+```bat
+compile.bat                 builds Release x64
+compile.bat Debug           builds Debug x64
+compile.bat Release Win32   32-bit build
+
+run.bat                     asks which process to inject into
+run.bat "Banana Drama.exe"  straight into the game
+run.bat "Banana Drama.exe" --wait
+
+update.bat                  then compile.bat again
+```
+
+`update.bat` keeps your `build\` folder but overwrites local edits to project
+files. `compile.bat` finds MSBuild through `vswhere`, so it needs Visual Studio
+2022 (or the Build Tools) installed.
+
 ## Using it
 
 ```bat
