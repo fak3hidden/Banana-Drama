@@ -26,33 +26,15 @@ with one of every ImGui widget.
 
 ## Getting the code
 
-The dependencies are git submodules, so clone with `--recurse-submodules`:
-
 ```bat
-git clone --recurse-submodules https://github.com/fak3hidden/Banana-Drama.git
+git clone https://github.com/fak3hidden/Banana-Drama.git
 ```
 
-Already cloned it? Run:
+or download the .zip and unzip it. **Dear ImGui and MinHook are committed in
+`vendor/`**, so there is nothing else to fetch: no submodules, no scripts, it
+builds as soon as you open the solution.
 
-```bat
-git submodule update --init --recursive
-```
-
-**Downloaded the .zip instead?** GitHub leaves `vendor\imgui` and `vendor\minhook`
-empty in those, so the build fails with "Cannot open include file: 'imgui.h'".
-Fetch the dependencies with either:
-
-```bat
-scripts\fetch-deps.bat
-```
-
-or, without git:
-
-```bat
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-deps.ps1
-```
-
-| Submodule | Version | What for |
+| Vendored | Version | What for |
 | --- | --- | --- |
 | `vendor/imgui` | v1.92.9b | the UI (core + `win32` and `dx11` backends) |
 | `vendor/minhook` | v1.3.4 | function hooking, ready for game hooks |
