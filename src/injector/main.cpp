@@ -184,11 +184,47 @@ bool IsWow64(HANDLE process, bool& wow64)
     return ok;
 }
 
+using NtCreateThreadExFn = long(__stdcall*)(void**, unsigned long, void*, void*, void*, void*,
+                                            unsigned long, std::size_t, std::size_t, std::size_t, void*);
+
+// CreateRemoteThread is refused across integrity levels and sessions where
+// NtCreateThreadEx still works - which is why Cheat Engine's injector sometimes
+// succeeds where a plain CreateRemoteThread does not. Try it first.
+HANDLE StartRemoteThread(HANDLE process, void* start, void* argument)
+{
+    if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+        const auto ntCreateThreadEx =
+            reinterpret_cast<NtCreateThreadExFn>(GetProcAddress(ntdll, "NtCreateThreadEx"));
+        if (ntCreateThreadEx) {
+            HANDLE thread = nullptr;
+            const long status = ntCreateThreadEx(&thread, 0x001FFFFF, nullptr, process, start,
+                                                 argument, 0, 0, 0, 0, nullptr);
+            if (status >= 0 && thread)
+                return thread;
+            if (thread)
+                CloseHandle(thread);
+            std::printf("  NtCreateThreadEx failed (0x%08lX), trying CreateRemoteThread\n",
+                        static_cast<unsigned long>(status));
+        }
+    }
+
+    return CreateRemoteThread(process, nullptr, 0,
+                              reinterpret_cast<LPTHREAD_START_ROUTINE>(start), argument, 0, nullptr);
+}
+
 DWORD Inject(DWORD processId, const std::wstring& dllPath)
 {
-    HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-                                     PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
-                                 FALSE, processId);
+    constexpr DWORD kFullRights = PROCESS_ALL_ACCESS;
+    constexpr DWORD kNormalRights = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+                                    PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+
+    HANDLE process = OpenProcess(kNormalRights, FALSE, processId);
+    if (!process)
+        process = OpenProcess(kFullRights, FALSE, processId);
+    if (!process)
+        process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_CREATE_THREAD |
+                                  PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+                              FALSE, processId);
     if (!process) {
         std::printf("OpenProcess(%lu) failed: %s\n", processId, ErrorText(GetLastError()).c_str());
         std::printf("  run this from an administrator terminal if the game was started elevated\n");
@@ -230,11 +266,9 @@ DWORD Inject(DWORD processId, const std::wstring& dllPath)
         return 1;
     }
 
-    HANDLE thread = CreateRemoteThread(process, nullptr, 0,
-                                       reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLibrary),
-                                       remote, 0, nullptr);
+    HANDLE thread = StartRemoteThread(process, reinterpret_cast<void*>(loadLibrary), remote);
     if (!thread) {
-        std::printf("CreateRemoteThread failed: %s\n", ErrorText(GetLastError()).c_str());
+        std::printf("Could not start a thread in the target: %s\n", ErrorText(GetLastError()).c_str());
         VirtualFreeEx(process, remote, 0, MEM_RELEASE);
         CloseHandle(process);
         return 1;
