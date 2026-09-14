@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <cwctype>
+#include <iostream>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -299,6 +300,37 @@ DWORD Inject(DWORD processId, const std::wstring& dllPath)
     return 0;
 }
 
+void Trim(std::wstring& text)
+{
+    const wchar_t* blanks = L" \t\r\n";
+    const std::size_t first = text.find_first_not_of(blanks);
+    if (first == std::wstring::npos) {
+        text.clear();
+        return;
+    }
+    const std::size_t last = text.find_last_not_of(blanks);
+    text = text.substr(first, last - first + 1);
+}
+
+// Double clicking the exe from Explorer gives it a brand new console that dies
+// with it, so the window vanishes before anything can be read. Detect that case
+// (only our own process is attached to the console) and wait for a key.
+bool StartedFromExplorer()
+{
+    DWORD attached[2]{};
+    return GetConsoleProcessList(attached, 2) <= 1;
+}
+
+void PauseBeforeExit()
+{
+    if (!StartedFromExplorer())
+        return;
+    std::printf("\nPress Enter to close...\n");
+    std::fflush(stdout);
+    std::wstring ignored;
+    std::getline(std::wcin, ignored);
+}
+
 void PrintUsage(const wchar_t* program)
 {
     std::wstring name = program;
@@ -320,27 +352,42 @@ int wmain(int argc, wchar_t** argv)
 {
     std::printf("Banana Drama injector - %s\n", sizeof(void*) == 8 ? "64-bit" : "32-bit");
 
+    std::wstring target;
+    std::wstring dllPath;
+    bool waitForProcess = false;
+
     if (argc < 2) {
+        // Double clicked: list what is running and ask what to inject into,
+        // instead of printing the usage and closing straight away.
         PrintUsage(argv[0]);
         std::printf("Running processes:\n\n");
         ListProcesses();
-        return 0;
+
+        std::printf("\nType a PID or a process name and press Enter (just Enter to quit):\n> ");
+        std::wstring line;
+        if (!std::getline(std::wcin, line)) {
+            PauseBeforeExit();
+            return 0;
+        }
+        Trim(line);
+        if (line.empty()) {
+            PauseBeforeExit();
+            return 0;
+        }
+        target = line;
+    } else {
+        target = argv[1];
+        for (int i = 2; i < argc; ++i) {
+            const std::wstring argument = argv[i];
+            if (argument == L"--wait" || argument == L"-w")
+                waitForProcess = true;
+            else if (dllPath.empty())
+                dllPath = argument;
+        }
     }
 
     if (!EnableDebugPrivilege())
         std::printf("Note: SeDebugPrivilege was not granted (usually fine for your own games).\n");
-
-    std::wstring target = argv[1];
-    std::wstring dllPath;
-    bool waitForProcess = false;
-
-    for (int i = 2; i < argc; ++i) {
-        const std::wstring argument = argv[i];
-        if (argument == L"--wait" || argument == L"-w")
-            waitForProcess = true;
-        else if (dllPath.empty())
-            dllPath = argument;
-    }
 
     if (dllPath.empty())
         dllPath = DefaultDllPath();
@@ -348,6 +395,7 @@ int wmain(int argc, wchar_t** argv)
     if (!FileExists(dllPath)) {
         std::wprintf(L"Dll not found: %s\n", dllPath.c_str());
         std::printf("  build the project first, or pass the full path as the second argument.\n");
+        PauseBeforeExit();
         return 1;
     }
 
@@ -368,6 +416,7 @@ int wmain(int argc, wchar_t** argv)
         if (ids.empty()) {
             std::wprintf(L"No running process matches %s.\n", target.c_str());
             std::printf("  run without arguments to list the running processes.\n");
+            PauseBeforeExit();
             return 1;
         }
         if (ids.size() > 1)
@@ -376,5 +425,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     std::printf("Target pid: %lu\n", processId);
-    return static_cast<int>(Inject(processId, dllPath));
+    const DWORD result = Inject(processId, dllPath);
+    PauseBeforeExit();
+    return static_cast<int>(result);
 }

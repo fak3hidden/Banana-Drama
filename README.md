@@ -55,8 +55,12 @@ Building **Release | Win32** gives `BananaDrama32.dll` for a 32-bit game.
 
 ```bat
 cd build\x64\Release
-BananaDrama.Injector.exe BananaDrama.exe
+BananaDrama.Injector.exe "Banana Drama.exe"
 ```
+
+Double clicking `BananaDrama.Injector.exe` also works: it lists the running
+processes and asks which one to inject into (it waits for you instead of
+closing straight away).
 
 ```
 BananaDrama.Injector.exe                        list running processes
