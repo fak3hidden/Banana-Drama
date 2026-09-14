@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cwchar>
+#include <cwctype>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -318,7 +320,8 @@ int wmain(int argc, wchar_t** argv)
     std::wprintf(L"Dll: %s\n", dllPath.c_str());
 
     DWORD processId = 0;
-    if (std::iswdigit(static_cast<wint_t>(target[0]))) {
+    const bool isPid = !target.empty() && target[0] >= L'0' && target[0] <= L'9';
+    if (isPid) {
         processId = static_cast<DWORD>(std::wcstoul(target.c_str(), nullptr, 10));
     } else {
         std::vector<DWORD> ids = FindProcessIds(target);
