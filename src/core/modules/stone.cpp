@@ -1,7 +1,6 @@
 #include "stone.h"
 
 #include "../app.h"
-#include "../core.h"
 #include "../ui/widgets.h"
 #include "../util/log.h"
 #include "../util/string_conv.h"
@@ -25,13 +24,9 @@ namespace {
 constexpr std::uint8_t kPatternBytes[] = { 0x41, 0x89, 0x87, 0x78, 0x05, 0x00, 0x00 };
 constexpr std::size_t kPatchSize = sizeof(kPatternBytes);
 constexpr std::size_t kStubSize = 64;
-constexpr std::int64_t kMaxJumpDistance = 0x7F000000; // just under 2 GB
-constexpr std::int64_t kAllocationStep = 0x10000;     // 64 KB granularity
-
-struct Hit {
-    HMODULE module = nullptr;
-    std::uint8_t* address = nullptr;
-};
+constexpr std::int64_t kMaxJumpDistance = 0x7F000000;
+constexpr std::int64_t kAllocationStep = 0x10000;
+constexpr std::size_t kMaxCandidates = 32;
 
 std::string ToLower(std::string text)
 {
@@ -48,8 +43,8 @@ std::string ModuleName(HMODULE module)
     return std::filesystem::path(Narrow(path)).filename().string();
 }
 
-// Patching ntdll, kernelbase or any other dll that ships with Windows is a
-// one way ticket to a Unity crash dialog, so those are never scanned.
+// Patching a dll that ships with Windows is a one way ticket to a Unity crash
+// dialog, so those are never scanned.
 bool IsSystemModule(HMODULE module)
 {
     wchar_t path[MAX_PATH]{};
@@ -64,7 +59,6 @@ bool IsSystemModule(HMODULE module)
     if (GetSystemDirectoryW(buffer, MAX_PATH) && lower.find(ToLower(Narrow(buffer))) == 0)
         return true;
 
-    // Known non-game runtimes that can legitimately contain the same bytes.
     static const char* const runtime[] = {
         "ntdll.dll", "kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll",
         "d3d11.dll", "dxgi.dll", "msvcp140.dll", "vcruntime140.dll", "ucrtbase.dll",
@@ -89,8 +83,18 @@ bool MatchesHere(const std::uint8_t* data, const std::vector<int>& pattern)
     return true;
 }
 
+void ScanRange(std::uint8_t* begin, std::size_t size, const std::vector<int>& pattern,
+               std::vector<std::uintptr_t>& out)
+{
+    for (std::size_t offset = 0; offset + pattern.size() <= size; ++offset) {
+        if (MatchesHere(begin + offset, pattern))
+            out.push_back(reinterpret_cast<std::uintptr_t>(begin + offset));
+    }
+}
+
 // Scans the committed, executable pages of one module.
-std::uint8_t* ScanModule(void* base, std::size_t size, const std::vector<int>& pattern)
+void ScanModule(void* base, std::size_t size, const std::vector<int>& pattern,
+                std::vector<std::uintptr_t>& out)
 {
     auto* region = static_cast<std::uint8_t*>(base);
     auto* const end = region + size;
@@ -105,85 +109,89 @@ std::uint8_t* ScanModule(void* base, std::size_t size, const std::vector<int>& p
             (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                                PAGE_EXECUTE_WRITECOPY)) != 0;
 
-        if (committed && executable && memory.RegionSize >= pattern.size()) {
-            auto* begin = static_cast<std::uint8_t*>(memory.BaseAddress);
-            const std::size_t regionSize = memory.RegionSize;
-            for (std::size_t offset = 0; offset + pattern.size() <= regionSize; ++offset) {
-                if (MatchesHere(begin + offset, pattern))
-                    return begin + offset;
-            }
-        }
+        if (committed && executable && memory.RegionSize >= pattern.size())
+            ScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize, pattern,
+                      out);
 
         region = static_cast<std::uint8_t*>(memory.BaseAddress) + memory.RegionSize;
     }
-    return nullptr;
+}
+
+struct ModuleRange {
+    HMODULE module = nullptr;
+    std::uintptr_t begin = 0;
+    std::uintptr_t end = 0;
+    bool system = false;
+};
+
+std::vector<ModuleRange> LoadedModules()
+{
+    std::vector<ModuleRange> ranges;
+
+    HMODULE modules[1024]{};
+    DWORD needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
+        return ranges;
+
+    const DWORD count = needed / sizeof(HMODULE);
+    for (DWORD i = 0; i < count && i < 1024; ++i) {
+        MODULEINFO info{};
+        if (!GetModuleInformation(GetCurrentProcess(), modules[i], &info, sizeof(info)))
+            continue;
+
+        ModuleRange range;
+        range.module = modules[i];
+        range.begin = reinterpret_cast<std::uintptr_t>(info.lpBaseOfDll);
+        range.end = range.begin + info.SizeOfImage;
+        range.system = IsSystemModule(modules[i]);
+        ranges.push_back(range);
+    }
+    return ranges;
+}
+
+std::string LabelFor(std::uintptr_t address, const std::vector<ModuleRange>& modules)
+{
+    for (const ModuleRange& range : modules) {
+        if (address >= range.begin && address < range.end)
+            return ModuleName(range.module);
+    }
+    return "memory";
+}
+
+std::uintptr_t BaseFor(std::uintptr_t address, const std::vector<ModuleRange>& modules)
+{
+    for (const ModuleRange& range : modules) {
+        if (address >= range.begin && address < range.end)
+            return range.begin;
+    }
+    return 0;
 }
 
 // Writes what the scan sees into the log, once per session.
-void LogModuleDump()
+void LogModuleDump(const std::vector<ModuleRange>& modules)
 {
     static bool done = false;
     if (done)
         return;
     done = true;
 
-    HMODULE modules[1024]{};
-    DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) {
-        log::Error("stone: EnumProcessModules failed (%lu)", GetLastError());
-        return;
-    }
-
-    const DWORD count = needed / sizeof(HMODULE);
-    log::Info("stone: %lu modules loaded, scanning for 41 89 87 78 05 00 00",
-              static_cast<unsigned long>(count));
-
-    for (DWORD i = 0; i < count && i < 1024 && i < 40; ++i) {
-        MODULEINFO info{};
-        if (!GetModuleInformation(GetCurrentProcess(), modules[i], &info, sizeof(info)))
-            continue;
-        log::Info("stone:   %s%s (base 0x%p, %lu KB)", ModuleName(modules[i]).c_str(),
-                  IsSystemModule(modules[i]) ? " [skipped: system]" : "",
-                  info.lpBaseOfDll, static_cast<unsigned long>(info.SizeOfImage / 1024));
+    log::Info("stone: %zu modules loaded, looking for 41 89 87 78 05 00 00",
+              modules.size());
+    for (std::size_t i = 0; i < modules.size() && i < 40; ++i) {
+        log::Info("stone:   %s%s (base 0x%p, %llu KB)", ModuleName(modules[i].module).c_str(),
+                  modules[i].system ? " [skipped: system]" : "",
+                  reinterpret_cast<void*>(modules[i].begin),
+                  static_cast<unsigned long long>((modules[i].end - modules[i].begin) / 1024));
     }
 }
 
-std::vector<Hit> FindPattern(const std::vector<int>& pattern)
-{
-    std::vector<Hit> hits;
-
-    HMODULE modules[1024]{};
-    DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
-        return hits;
-
-    const DWORD count = needed / sizeof(HMODULE);
-    for (DWORD i = 0; i < count && i < 1024; ++i) {
-        if (modules[i] == bd::g_module)   // never hook our own dll
-            continue;
-        if (IsSystemModule(modules[i]))   // never hook a Windows dll
-            continue;
-
-        MODULEINFO info{};
-        if (!GetModuleInformation(GetCurrentProcess(), modules[i], &info, sizeof(info)))
-            continue;
-        if (!info.lpBaseOfDll || info.SizeOfImage < pattern.size())
-            continue;
-
-        if (std::uint8_t* found = ScanModule(info.lpBaseOfDll, info.SizeOfImage, pattern))
-            hits.push_back({ modules[i], found });
-    }
-    return hits;
-}
-
-// Overwriting seven bytes while another thread is sitting in the middle of them
-// is how a hook turns into a crash, so everybody else is parked for the write.
+// Overwriting seven bytes while another thread sits in the middle of them is how
+// a hook turns into a crash, so everybody else is parked for the write.
 class ThreadFreeze {
 public:
     ThreadFreeze() { Suspend(); }
     ~ThreadFreeze() { Resume(); }
 
-    // True when some thread is executing inside [address, address + size).
     bool IsBusy(const void* address, std::size_t size) const
     {
         const auto begin = reinterpret_cast<std::uintptr_t>(address);
@@ -221,7 +229,6 @@ private:
             do {
                 if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
                     continue;
-
                 HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
                                                THREAD_QUERY_INFORMATION,
                                            FALSE, entry.th32ThreadID);
@@ -286,10 +293,13 @@ StoneModule::~StoneModule()
 
 void StoneModule::OnEnable()
 {
-    // Stays on when the hook fails: the menu then shows why, and OnFrame keeps
-    // retrying in case the game has not loaded the code yet.
-    if (!Install())
-        log::Warning("stone: hook not installed yet, retrying every couple of seconds");
+    Scan();
+
+    if (autoHook_ && !candidates_.empty()) {
+        if (Hook(candidates_[static_cast<std::size_t>(selected_)].address))
+            return;
+        log::Warning("stone: auto-hook failed, pick a match by hand");
+    }
 }
 
 void StoneModule::OnDisable()
@@ -301,61 +311,128 @@ void StoneModule::OnFrame()
 {
     ++frames_;
 
-    // Retry roughly every two seconds until it sticks.
-    if (!installed_ && frames_ % 120 == 0)
-        Install();
+    // Keep looking until something turns up, then wait for confirmation.
+    if (!installed_ && candidates_.empty() && frames_ % 120 == 0)
+        Scan();
 }
 
-bool StoneModule::Install()
+void StoneModule::Scan()
 {
-    if (installed_)
-        return true;
+    candidates_.clear();
+    selected_ = 0;
 
+    const std::vector<int> exact(kPatternBytes, kPatternBytes + kPatchSize);
+    std::vector<std::uintptr_t> addresses;
+
+    const std::vector<ModuleRange> modules = LoadedModules();
+    for (const ModuleRange& range : modules) {
+        if (range.module == bd::g_module || range.system)
+            continue;
+        ScanModule(reinterpret_cast<void*>(range.begin), range.end - range.begin, exact, addresses);
+    }
+
+    if (addresses.empty() && looseMatch_) {
+        // Any "mov [r15+disp32], eax": the stub replays the original bytes, so a
+        // moved counter still works - but it can also hit the wrong value.
+        const std::vector<int> loose = { 0x41, 0x89, 0x87, -1, -1, 0x00, 0x00 };
+        for (const ModuleRange& range : modules) {
+            if (range.module == bd::g_module || range.system)
+                continue;
+            ScanModule(reinterpret_cast<void*>(range.begin), range.end - range.begin, loose,
+                       addresses);
+        }
+    }
+
+    if (scanAllMemory_) {
+        // Cheat Engine scans everything, including JIT'd or allocated code that
+        // does not belong to any module.
+        SYSTEM_INFO systemInfo{};
+        GetSystemInfo(&systemInfo);
+
+        auto* region = static_cast<std::uint8_t*>(systemInfo.lpMinimumApplicationAddress);
+        auto* const limit = static_cast<std::uint8_t*>(systemInfo.lpMaximumApplicationAddress);
+
+        while (region < limit) {
+            MEMORY_BASIC_INFORMATION memory{};
+            if (!VirtualQuery(region, &memory, sizeof(memory)))
+                break;
+
+            const bool executable =
+                (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                   PAGE_EXECUTE_WRITECOPY)) != 0;
+
+            if (memory.State == MEM_COMMIT && executable && memory.RegionSize >= exact.size()) {
+                const auto begin = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
+                const auto end = begin + memory.RegionSize;
+
+                bool skip = false;
+                for (const ModuleRange& range : modules) {
+                    if (range.module == bd::g_module)
+                        continue;
+                    if (range.system && begin >= range.begin && begin < range.end)
+                        skip = true; // already covered, and never a Windows dll
+                }
+
+                if (!skip) {
+                    std::vector<std::uintptr_t> found;
+                    ScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize,
+                              exact, found);
+                    for (std::uintptr_t address : found) {
+                        if (std::find(addresses.begin(), addresses.end(), address) == addresses.end())
+                            addresses.push_back(address);
+                    }
+                }
+            }
+
+            region = static_cast<std::uint8_t*>(memory.BaseAddress) + memory.RegionSize;
+        }
+    }
+
+    std::sort(addresses.begin(), addresses.end());
+
+    for (std::uintptr_t address : addresses) {
+        if (candidates_.size() >= kMaxCandidates)
+            break;
+        Candidate candidate;
+        candidate.address = address;
+        candidate.label = LabelFor(address, modules);
+        candidates_.push_back(candidate);
+        log::Info("stone: match in %s at 0x%p", candidate.label.c_str(),
+                  reinterpret_cast<void*>(address));
+    }
+
+    if (candidates_.empty()) {
+        status_ = "no match found (rescanning)";
+        log::Error("stone: no match, %zu modules scanned", modules.size());
+        LogModuleDump(modules);
+        return;
+    }
+
+    char buffer[128];
+    std::snprintf(buffer, sizeof(buffer), "%zu match%s found - pick one below",
+                  candidates_.size(), candidates_.size() == 1 ? "" : "es");
+    status_ = buffer;
+}
+
+bool StoneModule::Hook(std::uintptr_t address)
+{
 #ifndef _WIN64
+    (void)address;
     status_ = "64-bit only - build the x64 configuration";
     log::Error("stone: this hook needs the 64-bit build");
     return false;
 #else
-    const std::vector<int> exact(kPatternBytes, kPatternBytes + kPatchSize);
-    std::vector<Hit> hits = FindPattern(exact);
-    bool loose = false;
-
-    if (hits.empty() && looseMatch_) {
-        // Any "mov [r15+disp32], eax": the stub replays the original bytes, so a
-        // moved counter still works - but it can also hit the wrong value.
-        hits = FindPattern({ 0x41, 0x89, 0x87, -1, -1, 0x00, 0x00 });
-        loose = !hits.empty();
-    }
-
-    if (hits.empty()) {
-        status_ = "pattern not found (retrying)";
-        log::Error("stone: instruction not found in any game module");
-        LogModuleDump();
+    if (installed_)
+        Remove();
+    if (address == 0)
         return false;
-    }
 
-    // Prefer the game exe, otherwise the first non-system module.
-    std::size_t index = 0;
-    for (std::size_t i = 0; i < hits.size(); ++i) {
-        log::Info("stone: match in %s at 0x%p", ModuleName(hits[i].module).c_str(),
-                  static_cast<void*>(hits[i].address));
-        if (hits[i].module == GetModuleHandleW(nullptr))
-            index = i;
-    }
-
-    std::uint8_t* found = hits[index].address;
-    module_ = hits[index].module;
-    matchCount_ = static_cast<int>(hits.size());
-
-    if (loose)
-        log::Warning("stone: using a loose match, check that it is really the stone counter");
+    auto* found = reinterpret_cast<std::uint8_t*>(address);
 
     void* memory = AllocateNear(found, kStubSize);
     if (!memory) {
         status_ = "could not allocate memory near the game code";
-        log::Error("stone: no memory within 2 GB of the instruction");
-        LogModuleDump();
-        target_ = nullptr;
+        log::Error("stone: no memory within 2 GB of 0x%p", static_cast<void*>(found));
         return false;
     }
 
@@ -398,8 +475,6 @@ bool StoneModule::Install()
         return false;
     }
 
-    // Write the diversion with every other thread parked, and back off if one of
-    // them is standing in the bytes we are about to overwrite.
     std::uint8_t patch[kPatchSize];
     const std::int32_t jump = static_cast<std::int32_t>(relative);
     patch[0] = 0xE9;
@@ -407,6 +482,7 @@ bool StoneModule::Install()
     patch[5] = 0x90;
     patch[6] = 0x90;
 
+    DWORD protection = 0;
     {
         ThreadFreeze freeze;
         if (freeze.IsBusy(found, kPatchSize)) {
@@ -416,17 +492,10 @@ bool StoneModule::Install()
         }
 
         std::memcpy(original_, found, kPatchSize);
-        target_ = found;
-        stub_ = memory;
-        stubSize_ = kStubSize;
 
-        DWORD protection = 0;
         if (!VirtualProtect(found, kPatchSize, PAGE_EXECUTE_READWRITE, &protection)) {
-            status_ = "VirtualProtect failed";
-            log::Error("stone: VirtualProtect failed (%lu)", GetLastError());
-            target_ = nullptr;
-            stub_ = nullptr;
             VirtualFree(memory, 0, MEM_RELEASE);
+            protection = 0;
             return false;
         }
 
@@ -435,17 +504,25 @@ bool StoneModule::Install()
         FlushInstructionCache(GetCurrentProcess(), found, kPatchSize);
     }
 
+    if (protection == 0) {
+        status_ = "VirtualProtect failed";
+        log::Error("stone: VirtualProtect failed (%lu)", GetLastError());
+        return false;
+    }
+
+    target_ = found;
+    stub_ = memory;
+    stubSize_ = kStubSize;
     installed_ = true;
 
+    const std::vector<ModuleRange> modules = LoadedModules();
     char buffer[192];
-    std::snprintf(buffer, sizeof(buffer), "hooked in %s at +0x%llX (%d match%s)",
-                  ModuleName(module_).c_str(),
-                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(found) -
-                                                  reinterpret_cast<std::uintptr_t>(module_)),
-                  matchCount_, matchCount_ == 1 ? "" : "es");
+    std::snprintf(buffer, sizeof(buffer), "hooked at %s+0x%llX",
+                  LabelFor(address, modules).c_str(),
+                  static_cast<unsigned long long>(address - BaseFor(address, modules)));
     status_ = buffer;
-    log::Info("stone: hooked %s at 0x%p (mode %s, amount %d)", ModuleName(module_).c_str(),
-              static_cast<void*>(found), mode_ == Mode::Add ? "add" : "set", amount_);
+    log::Info("stone: hooked 0x%p (mode %s, amount %d)", static_cast<void*>(found),
+              mode_ == Mode::Add ? "add" : "set", amount_);
     return true;
 #endif
 }
@@ -467,37 +544,31 @@ void StoneModule::Remove()
         log::Error("stone: could not restore the original bytes (%lu)", GetLastError());
     }
 
-    // The stub is deliberately not freed: a thread can still be sitting in it,
-    // and 64 bytes is not worth crashing the game over.
+    // The stub is deliberately not freed: a thread can still be sitting in it.
     stub_ = nullptr;
     target_ = nullptr;
     installed_ = false;
-    module_ = nullptr;
-    status_ = "not installed";
+    status_ = candidates_.empty() ? "not scanned yet" : "hook removed";
 }
 
 void StoneModule::Reinstall()
 {
-    if (!installed_)
+    if (!installed_ || !target_)
         return;
+    const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(target_);
     Remove();
-    Install();
+    Hook(address);
 }
 
 void StoneModule::OnMenu()
 {
-    const bool live = installed_;
-    if (!live) {
-        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.30f, 1.0f), "%s - retrying", status_.c_str());
-        ImGui::TextDisabled("Leave it on: it hooks as soon as the instruction shows up.");
-        if (!ImGui::Button("Retry now"))
-            return;
-        Install();
-        return;
+    if (installed_) {
+        ImGui::TextColored(ImVec4(0.45f, 0.90f, 0.45f, 1.0f), "%s", status_.c_str());
+    } else {
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.30f, 1.0f), "%s", status_.c_str());
     }
 
-    ImGui::TextColored(ImVec4(0.45f, 0.90f, 0.45f, 1.0f), "%s", status_.c_str());
-    ImGui::TextDisabled("Only game modules are scanned - Windows dlls are skipped.");
+    ImGui::TextDisabled("Windows dlls are never scanned or patched.");
 
     int mode = static_cast<int>(mode_);
     const char* modes[] = { "Add on every gain", "Set to a fixed value" };
@@ -514,16 +585,69 @@ void StoneModule::OnMenu()
         app::MarkSettingsDirty();
     }
 
-    if (ui::Toggle("Loose match", &looseMatch_,
-                   "Off: only the exact 41 89 87 78 05 00 00 bytes. On: any "
-                   "mov [r15+disp32], eax, which can hook the wrong value.")) {
-        Reinstall();
-        app::MarkSettingsDirty();
-    }
+    if (!installed_) {
+        ImGui::Spacing();
 
-    if (ImGui::Button("Re-hook")) {
-        Reinstall();
-        app::MarkSettingsDirty();
+        if (candidates_.empty()) {
+            ImGui::TextDisabled("Nothing found yet. Turn off any Cheat Engine script for this "
+                                "address first, then rescan.");
+        } else {
+            std::vector<std::string> labels;
+            for (const Candidate& candidate : candidates_) {
+                char buffer[96];
+                std::snprintf(buffer, sizeof(buffer), "%s+0x%llX", candidate.label.c_str(),
+                              static_cast<unsigned long long>(candidate.address));
+                labels.push_back(buffer);
+            }
+
+            std::vector<const char*> items;
+            for (const std::string& label : labels)
+                items.push_back(label.c_str());
+
+            if (selected_ >= static_cast<int>(candidates_.size()))
+                selected_ = 0;
+
+            ImGui::Combo("Match", &selected_, items.data(), static_cast<int>(items.size()));
+
+            if (ImGui::Button("Hook this one")) {
+                if (Hook(candidates_[static_cast<std::size_t>(selected_)].address))
+                    app::MarkSettingsDirty();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("starts at the first match");
+        }
+
+        if (ImGui::Button("Rescan")) {
+            Scan();
+            app::MarkSettingsDirty();
+        }
+
+        if (ui::Toggle("Scan all memory", &scanAllMemory_,
+                       "Also search code that does not belong to a module, like Cheat Engine "
+                       "does. Needed for Mono/JIT'd game code.")) {
+            Scan();
+            app::MarkSettingsDirty();
+        }
+
+        if (ui::Toggle("Loose match", &looseMatch_,
+                       "Any mov [r15+disp32], eax instead of only 0x578. Can hook the wrong "
+                       "value.")) {
+            Scan();
+            app::MarkSettingsDirty();
+        }
+
+        if (ui::Toggle("Auto-hook", &autoHook_,
+                       "Hook the selected match as soon as the module is switched on. Only turn "
+                       "this on once you know which match is the right one."))
+            app::MarkSettingsDirty();
+    } else {
+        if (ImGui::Button("Unhook")) {
+            Remove();
+            app::MarkSettingsDirty();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Re-hook"))
+            Reinstall();
     }
 
     ImGui::TextDisabled("%d frames since it was switched on", frames_);
@@ -535,6 +659,9 @@ void StoneModule::OnSave(json::Value& out) const
     out.set("mode", json::Value(static_cast<int>(mode_)));
     out.set("amount", json::Value(amount_));
     out.set("looseMatch", json::Value(looseMatch_));
+    out.set("scanAllMemory", json::Value(scanAllMemory_));
+    out.set("autoHook", json::Value(autoHook_));
+    out.set("selected", json::Value(selected_));
 }
 
 void StoneModule::OnLoad(const json::Value& in)
@@ -545,6 +672,12 @@ void StoneModule::OnLoad(const json::Value& in)
         amount_ = v->asInt(amount_);
     if (const json::Value* v = in.find("looseMatch"))
         looseMatch_ = v->asBool(looseMatch_);
+    if (const json::Value* v = in.find("scanAllMemory"))
+        scanAllMemory_ = v->asBool(scanAllMemory_);
+    if (const json::Value* v = in.find("autoHook"))
+        autoHook_ = v->asBool(autoHook_);
+    if (const json::Value* v = in.find("selected"))
+        selected_ = v->asInt(selected_);
 }
 
 } // namespace bd

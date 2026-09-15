@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "module.h"
 
@@ -16,12 +17,10 @@ namespace bd {
 //
 //     mov [r15+0x578], eax       41 89 87 78 05 00 00
 //
-// so we scan the game module for those bytes, divert them into a small stub and
-// add an amount to eax before the value is stored. The stub keeps every other
-// register and the flags untouched, and jumps straight back afterwards.
-//
-// Ported from the Cheat Engine table in the README. 64-bit only: on a 32-bit
-// build the pattern will not be found and the module says so.
+// Switching the module on only *searches*. It lists what it found and waits for
+// you to confirm, because patching the wrong copy of those bytes (a system dll,
+// or a second copy Cheat Engine left behind) crashes the game. Once you know
+// which entry is the right one, tick "Auto-hook" to skip the confirmation.
 class StoneModule : public Module {
 public:
     StoneModule();
@@ -37,23 +36,33 @@ public:
 private:
     enum class Mode { Add = 0, Set = 1 };
 
-    bool Install();
+    struct Candidate {
+        std::uintptr_t address = 0;
+        std::string label; // module name, or "memory" when it sits outside one
+    };
+
+    // Fills candidates_ and logs every hit.
+    void Scan();
+    bool Hook(std::uintptr_t address);
     void Remove();
     void Reinstall();
 
     Mode mode_ = Mode::Add;
     int amount_ = 999999;
-    bool looseMatch_ = false; // off by default: the loose scan can hook the wrong value
-    int matchCount_ = 0;
+    bool looseMatch_ = false;      // any mov [r15+disp32], eax, not just 0x578
+    bool scanAllMemory_ = false;   // include JIT'd / allocated code, like CE's aobscan
+    bool autoHook_ = false;        // hook without asking first
 
-    HMODULE module_ = nullptr;
+    std::vector<Candidate> candidates_;
+    int selected_ = 0;
+
     std::uint8_t* target_ = nullptr;
     void* stub_ = nullptr;
     std::size_t stubSize_ = 0;
     std::uint8_t original_[7]{};
     bool installed_ = false;
     int frames_ = 0;
-    std::string status_ = "not installed";
+    std::string status_ = "not scanned yet";
 };
 
 } // namespace bd

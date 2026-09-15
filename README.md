@@ -135,7 +135,7 @@ tests/json_tests.cpp unit tests for the json module (not part of the solution)
 
 ### Stone
 
-Ported from your Cheat Engine table. It scans the game module for
+Ported from the Cheat Engine table. It looks for
 
 ```
 mov [r15+0x578], eax        41 89 87 78 05 00 00
@@ -146,11 +146,28 @@ and diverts that instruction into a small stub that adds an amount (default
 the flags are left alone, and the original bytes are put back the moment you
 switch the module off.
 
-- **Add on every gain** - grows the counter each time the game updates it
-- **Set to a fixed value** - pins the counter to the amount
+**Switching it on only searches.** It lists every match it found and waits for
+you to pick one and press *Hook this one*, because patching the wrong copy of
+those bytes crashes the game. Once you know which entry is right, tick
+**Auto-hook** to skip that step.
 
-If a game update moves the instruction, the module reports "pattern not found"
-in the menu instead of crashing. It is 64-bit only.
+Only game modules are scanned: `ntdll`, `kernelbase`, `d3d11` and the rest of
+Windows is never touched. All other threads are suspended for the write, and if
+one of them is executing inside the seven bytes being overwritten the module
+waits instead of corrupting them.
+
+Options:
+
+- **Add on every gain** or **Set to a fixed value**, plus the amount
+- **Scan all memory** - also searches JIT'd code outside modules, like CE does
+  (needed for Mono builds)
+- **Loose match** - any `mov [r15+disp32], eax`, for when a patch moves the counter
+- **Auto-hook** - hook straight away instead of asking
+
+**Turn any Cheat Engine script for this address off first.** While CE's script
+is enabled those bytes are already replaced by CE's jump, so the scan finds a
+different copy (often the copy inside CE's own code cave) and hooking that
+crashes. Restart the game without CE if you are unsure.
 
 ## Adding a module
 
