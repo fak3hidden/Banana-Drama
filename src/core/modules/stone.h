@@ -43,6 +43,8 @@ private:
 
     Mode mode_ = Mode::Add;
     int amount_ = 999999;
+    bool looseMatch_ = false; // off by default: the loose scan can hook the wrong value
+    int matchCount_ = 0;
 
     HMODULE module_ = nullptr;
     std::uint8_t* target_ = nullptr;
