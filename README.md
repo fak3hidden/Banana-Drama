@@ -179,6 +179,19 @@ crashes. Restart the game without CE if you are unsure.
 
 The menu lists it, the config saves it, and it costs you nothing else.
 
+## Am I running the newest version?
+
+**Debug tab -> Check for updates.** It asks GitHub what the newest commit on the
+branch is and compares that time with when the dll you injected was compiled:
+
+- green **up to date** - that dll is the newest code
+- orange **OUTDATED** - run `update.bat`, then `compile.bat`, and inject again
+
+A stale dll is the usual cause of "I pushed a fix and nothing changed": the game
+keeps the old copy loaded until you inject the new one. The `Built` row above it
+shows the exact compile time, and *Open log file* / *Open settings folder* open
+`%APPDATA%\BananaDrama` for you.
+
 ## Troubleshooting
 
 | Symptom | What to check |

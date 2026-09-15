@@ -76,7 +76,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;d3dcompiler.lib;winhttp.lib;shell32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -108,6 +108,7 @@
   <!-- our own sources -->
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="build_info.cpp" />
     <ClCompile Include="config.cpp" />
     <ClCompile Include="hooks.cpp" />
     <ClCompile Include="hotkey.cpp" />
@@ -123,6 +124,7 @@
     <ClCompile Include="util\json.cpp" />
     <ClCompile Include="util\log.cpp" />
     <ClCompile Include="util\paths.cpp" />
+    <ClCompile Include="util\update_check.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core.h" />
@@ -138,11 +140,13 @@
     <ClInclude Include="modules\overlay.h" />
     <ClInclude Include="modules\sandbox.h" />
     <ClInclude Include="modules\stone.h" />
+    <ClInclude Include="build_info.h" />
     <ClInclude Include="ui\widgets.h" />
     <ClInclude Include="util\env.h" />
     <ClInclude Include="util\json.h" />
     <ClInclude Include="util\log.h" />
     <ClInclude Include="util\paths.h" />
+    <ClInclude Include="util\update_check.h" />
     <ClInclude Include="util\string_conv.h" />
   </ItemGroup>
 

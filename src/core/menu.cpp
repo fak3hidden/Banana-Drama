@@ -7,7 +7,9 @@
 #include "hotkey.h"
 #include "renderer.h"
 #include "settings.h"
+#include "build_info.h"
 #include "ui/widgets.h"
+#include "util/update_check.h"
 #include "util/env.h"
 #include "util/log.h"
 #include "util/paths.h"
@@ -228,7 +230,48 @@ void DrawDebugTab()
 
     ui::Section("Overlay");
     ui::KeyValue("Dear ImGui", IMGUI_VERSION);
-    ui::KeyValue("Built", (std::string(__DATE__) + " " + __TIME__).c_str());
+    ui::KeyValue("Built", build_info::Stamp());
+
+    // Is the dll in the game the one that was pushed last?
+    ui::Section("Update");
+    const update_check::State state = update_check::GetState();
+    const update_check::Info& updateInfo = update_check::GetInfo();
+
+    std::string latest = "not checked yet";
+    if (state != update_check::State::Idle && !updateInfo.sha.empty())
+        latest = updateInfo.sha.substr(0, 7) + "  " + updateInfo.date;
+    ui::KeyValue("Newest on GitHub", latest.c_str());
+
+    if (ImGui::Button("Check for updates"))
+        update_check::Check();
+
+    ImGui::SameLine();
+    switch (state) {
+    case update_check::State::Idle:
+        ImGui::TextDisabled("- press the button, needs internet");
+        break;
+    case update_check::State::UpToDate:
+        ImGui::TextColored(ImVec4(0.45f, 0.90f, 0.45f, 1.0f), "- up to date");
+        break;
+    case update_check::State::Outdated:
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.30f, 1.0f), "- OUTDATED: run update.bat, then compile.bat");
+        break;
+    case update_check::State::Failed:
+        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "- %s",
+                           update_check::GetError().c_str());
+        break;
+    }
+
+    if (!updateInfo.message.empty())
+        ImGui::TextWrapped("%s", updateInfo.message.c_str());
+
+    ImGui::TextDisabled("fak3hidden/Banana-Drama @ arena/01a09c74-banana-drama");
+
+    if (ImGui::Button("Open log file"))
+        paths::ShowInExplorer(paths::LogPath());
+    ImGui::SameLine();
+    if (ImGui::Button("Open settings folder"))
+        paths::ShowInExplorer(paths::ConfigPath());
     std::snprintf(buffer, sizeof(buffer), "%.0f fps (%.2f ms)", ImGui::GetIO().Framerate,
                   1000.0f / std::max(1.0f, ImGui::GetIO().Framerate));
     ui::KeyValue("Frame", buffer);
