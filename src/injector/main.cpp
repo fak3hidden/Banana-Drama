@@ -214,6 +214,115 @@ HANDLE StartRemoteThread(HANDLE process, void* start, void* argument)
                               reinterpret_cast<LPTHREAD_START_ROUTINE>(start), argument, 0, nullptr);
 }
 
+// Reads the import table of a dll so a failed load can be explained: a dll that
+// needs a module that is not installed simply returns NULL from LoadLibraryW
+// with no other clue.
+std::vector<std::string> ImportedModules(const std::wstring& dllPath)
+{
+    std::vector<std::string> names;
+
+    const HANDLE file = CreateFileW(dllPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return names;
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 4096) {
+        CloseHandle(file);
+        return names;
+    }
+
+    std::vector<char> image(static_cast<std::size_t>(size.QuadPart));
+    DWORD read = 0;
+    if (!ReadFile(file, image.data(), static_cast<DWORD>(image.size()), &read, nullptr) || read < 4096) {
+        CloseHandle(file);
+        return names;
+    }
+    CloseHandle(file);
+
+    const char* const begin = image.data();
+    const char* const limit = begin + image.size();
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(begin);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return names;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(begin + dos->e_lfanew);
+    if (reinterpret_cast<const char*>(nt) + sizeof(*nt) > limit || nt->Signature != IMAGE_NT_SIGNATURE)
+        return names;
+
+    const bool pe64 = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    const DWORD importRva = pe64
+        ? reinterpret_cast<const IMAGE_NT_HEADERS64*>(nt)->OptionalHeader
+              .DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress
+        : nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!importRva)
+        return names;
+
+    const auto* section = IMAGE_FIRST_SECTION(nt);
+    const WORD sections = nt->FileHeader.NumberOfSections;
+
+    const auto offsetOf = [&](DWORD rva) -> DWORD {
+        for (WORD i = 0; i < sections; ++i) {
+            const DWORD start = section[i].VirtualAddress;
+            const DWORD span = section[i].Misc.VirtualSize ? section[i].Misc.VirtualSize
+                                                           : section[i].SizeOfRawData;
+            if (rva >= start && rva < start + span)
+                return section[i].PointerToRawData + (rva - start);
+        }
+        return 0;
+    };
+
+    const DWORD importOffset = offsetOf(importRva);
+    if (!importOffset || importOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) > image.size())
+        return names;
+
+    const auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(begin + importOffset);
+    for (; descriptor->Name; ++descriptor) {
+        if (reinterpret_cast<const char*>(descriptor) + sizeof(*descriptor) > limit)
+            break;
+        const DWORD nameOffset = offsetOf(descriptor->Name);
+        if (!nameOffset || nameOffset >= image.size())
+            continue;
+        const char* name = begin + nameOffset;
+        if (name >= limit)
+            continue;
+        if (std::strlen(name) == 0 || strlen(name) > 255)
+            continue;
+        names.emplace_back(name);
+    }
+    return names;
+}
+
+// Tries every module the dll needs, and says which one is missing.
+void ReportDependencies(const std::wstring& dllPath)
+{
+    const std::vector<std::string> names = ImportedModules(dllPath);
+    if (names.empty()) {
+        std::printf("  Could not read the dll's imports - is the file a valid 64-bit dll?\n");
+        return;
+    }
+
+    std::printf("\n  Modules this dll needs:\n");
+    bool missing = false;
+    for (const std::string& name : names) {
+        const std::wstring wide(name.begin(), name.end());
+        HMODULE module = GetModuleHandleW(wide.c_str());
+        const char* state = "already loaded";
+        if (!module) {
+            module = LoadLibraryW(wide.c_str());
+            state = module ? "loads on demand" : "MISSING";
+        }
+        if (!module)
+            missing = true;
+        std::printf("    %-28s %s\n", name.c_str(), state);
+    }
+
+    if (missing) {
+        std::printf("\n  A module is missing, so the game cannot load the dll. Install the\n");
+        std::printf("  Visual C++ redistributable that matches your Visual Studio version.\n");
+    }
+}
+
 DWORD Inject(DWORD processId, const std::wstring& dllPath)
 {
     constexpr DWORD kFullRights = PROCESS_ALL_ACCESS;
@@ -291,7 +400,9 @@ DWORD Inject(DWORD processId, const std::wstring& dllPath)
         return 1;
     }
     if (exitCode == 0) {
-        std::printf("LoadLibraryW returned NULL - check the log file in %%APPDATA%%\\BananaDrama\n");
+        std::printf("LoadLibraryW returned NULL - the game refused to load the dll.\n");
+        ReportDependencies(dllPath);
+        std::printf("\n  Also check the log file in %%APPDATA%%\\BananaDrama\n");
         return 1;
     }
 
@@ -357,8 +468,17 @@ int wmain(int argc, wchar_t** argv)
     std::wstring dllPath;
     bool waitForProcess = false;
 
-    if (argc < 2) {
-        // No arguments: use Banana Drama.exe if exactly one is running.
+    if (argc >= 2) {
+        target = argv[1];
+        for (int i = 2; i < argc; ++i) {
+            const std::wstring argument = argv[i];
+            if (argument == L"--wait" || argument == L"-w")
+                waitForProcess = true;
+            else if (dllPath.empty())
+                dllPath = argument;
+        }
+    } else {
+        // No arguments: go for Banana Drama.exe when exactly one is running.
         const std::vector<DWORD> ids = FindProcessIds(kDefaultProcess);
         if (ids.size() == 1) {
             std::printf("Attaching to %ls (pid %lu)\n", kDefaultProcess, ids[0]);
@@ -370,7 +490,10 @@ int wmain(int argc, wchar_t** argv)
             else
                 std::printf("Found %zu copies of %ls, pick one instead:\n", ids.size(),
                             kDefaultProcess);
+
+            std::printf("\nRunning processes:\n\n");
             ListProcesses();
+
             std::printf("\nType a PID or a process name and press Enter (just Enter to quit):\n> ");
             std::wstring line;
             if (!std::getline(std::wcin, line)) {
@@ -383,32 +506,6 @@ int wmain(int argc, wchar_t** argv)
                 return 0;
             }
             target = line;
-        }
-    } else {
-        std::printf("Running processes:\n\n");
-        ListProcesses();
-
-        std::printf("\nType a PID or a process name and press Enter (just Enter to quit):\n> ");
-        std::wstring line;
-        if (!std::getline(std::wcin, line)) {
-            PauseBeforeExit();
-            return 0;
-        }
-        Trim(line);
-        if (line.empty()) {
-            PauseBeforeExit();
-            return 0;
-        }
-        target = line;
-    }
-    {
-        target = argv[1];
-        for (int i = 2; i < argc; ++i) {
-            const std::wstring argument = argv[i];
-            if (argument == L"--wait" || argument == L"-w")
-                waitForProcess = true;
-            else if (dllPath.empty())
-                dllPath = argument;
         }
     }
 
