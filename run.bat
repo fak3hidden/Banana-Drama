@@ -29,7 +29,11 @@ echo.
 echo   %EXE%
 echo.
 
-"%EXE%" %*
+if "%~1"=="" (
+    "%EXE%" "Banana Drama.exe"
+) else (
+    "%EXE%" %*
+)
 
 echo.
 pause

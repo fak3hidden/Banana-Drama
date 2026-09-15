@@ -28,7 +28,8 @@
 
 namespace {
 
-constexpr DWORD kWaitForever = 0xFFFFFFFF; // caller prints its own timeout message
+// The game this injector is for: with no arguments it goes straight for it.
+constexpr const wchar_t* kDefaultProcess = L"Banana Drama.exe";
 
 std::wstring Widen(const std::string& narrow)
 {
@@ -357,9 +358,33 @@ int wmain(int argc, wchar_t** argv)
     bool waitForProcess = false;
 
     if (argc < 2) {
-        // Double clicked: list what is running and ask what to inject into,
-        // instead of printing the usage and closing straight away.
-        PrintUsage(argv[0]);
+        // No arguments: use Banana Drama.exe if exactly one is running.
+        const std::vector<DWORD> ids = FindProcessIds(kDefaultProcess);
+        if (ids.size() == 1) {
+            std::printf("Attaching to %ls (pid %lu)\n", kDefaultProcess, ids[0]);
+            target = kDefaultProcess;
+            waitForProcess = false;
+        } else {
+            if (ids.empty())
+                std::printf("No running %ls, pick a process instead:\n", kDefaultProcess);
+            else
+                std::printf("Found %zu copies of %ls, pick one instead:\n", ids.size(),
+                            kDefaultProcess);
+            ListProcesses();
+            std::printf("\nType a PID or a process name and press Enter (just Enter to quit):\n> ");
+            std::wstring line;
+            if (!std::getline(std::wcin, line)) {
+                PauseBeforeExit();
+                return 0;
+            }
+            Trim(line);
+            if (line.empty()) {
+                PauseBeforeExit();
+                return 0;
+            }
+            target = line;
+        }
+    } else {
         std::printf("Running processes:\n\n");
         ListProcesses();
 
@@ -375,7 +400,8 @@ int wmain(int argc, wchar_t** argv)
             return 0;
         }
         target = line;
-    } else {
+    }
+    {
         target = argv[1];
         for (int i = 2; i < argc; ++i) {
             const std::wstring argument = argv[i];

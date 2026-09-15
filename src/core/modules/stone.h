@@ -51,6 +51,7 @@ private:
     int amount_ = 999999;
     bool looseMatch_ = false;      // any mov [r15+disp32], eax, not just 0x578
     bool scanAllMemory_ = false;   // include JIT'd / allocated code, like CE's aobscan
+    bool onlyGameExe_ = true;      // only search BananaDrama.exe, not every dll
     bool autoHook_ = false;        // hook without asking first
 
     std::vector<Candidate> candidates_;

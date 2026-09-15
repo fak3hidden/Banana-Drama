@@ -92,6 +92,25 @@ void ScanRange(std::uint8_t* begin, std::size_t size, const std::vector<int>& pa
     }
 }
 
+// Reading is guarded by VirtualQuery, but a fault here would take the whole
+// game with it, so on MSVC the scan sits inside structured exception handling.
+bool SafeScanRange(std::uint8_t* begin, std::size_t size, const std::vector<int>& pattern,
+                   std::vector<std::uintptr_t>& out)
+{
+#ifdef _MSC_VER
+    __try {
+        ScanRange(begin, size, pattern, out);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    ScanRange(begin, size, pattern, out);
+    return true;
+#endif
+}
+
 // Scans the committed, executable pages of one module.
 void ScanModule(void* base, std::size_t size, const std::vector<int>& pattern,
                 std::vector<std::uintptr_t>& out)
@@ -109,9 +128,12 @@ void ScanModule(void* base, std::size_t size, const std::vector<int>& pattern,
             (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                                PAGE_EXECUTE_WRITECOPY)) != 0;
 
-        if (committed && executable && memory.RegionSize >= pattern.size())
-            ScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize, pattern,
-                      out);
+        if (committed && executable && memory.RegionSize >= pattern.size()) {
+            if (!SafeScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize,
+                               pattern, out))
+                log::Warning("stone: could not read 0x%p, skipping that region",
+                             memory.BaseAddress);
+        }
 
         region = static_cast<std::uint8_t*>(memory.BaseAddress) + memory.RegionSize;
     }
@@ -293,13 +315,16 @@ StoneModule::~StoneModule()
 
 void StoneModule::OnEnable()
 {
-    Scan();
-
+    // Nothing happens by itself: scanning and hooking are both explicit button
+    // presses, so a crash can always be traced to the step that caused it.
     if (autoHook_ && !candidates_.empty()) {
         if (Hook(candidates_[static_cast<std::size_t>(selected_)].address))
             return;
         log::Warning("stone: auto-hook failed, pick a match by hand");
     }
+
+    if (!installed_)
+        status_ = "press Scan to look for the instruction";
 }
 
 void StoneModule::OnDisable()
@@ -310,10 +335,6 @@ void StoneModule::OnDisable()
 void StoneModule::OnFrame()
 {
     ++frames_;
-
-    // Keep looking until something turns up, then wait for confirmation.
-    if (!installed_ && candidates_.empty() && frames_ % 120 == 0)
-        Scan();
 }
 
 void StoneModule::Scan()
@@ -325,8 +346,12 @@ void StoneModule::Scan()
     std::vector<std::uintptr_t> addresses;
 
     const std::vector<ModuleRange> modules = LoadedModules();
+    const HMODULE mainModule = GetModuleHandleW(nullptr);
+
     for (const ModuleRange& range : modules) {
         if (range.module == bd::g_module || range.system)
+            continue;
+        if (onlyGameExe_ && range.module != mainModule)
             continue;
         ScanModule(reinterpret_cast<void*>(range.begin), range.end - range.begin, exact, addresses);
     }
@@ -337,6 +362,8 @@ void StoneModule::Scan()
         const std::vector<int> loose = { 0x41, 0x89, 0x87, -1, -1, 0x00, 0x00 };
         for (const ModuleRange& range : modules) {
             if (range.module == bd::g_module || range.system)
+                continue;
+            if (onlyGameExe_ && range.module != mainModule)
                 continue;
             ScanModule(reinterpret_cast<void*>(range.begin), range.end - range.begin, loose,
                        addresses);
@@ -375,8 +402,8 @@ void StoneModule::Scan()
 
                 if (!skip) {
                     std::vector<std::uintptr_t> found;
-                    ScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize,
-                              exact, found);
+                    SafeScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize,
+                                  exact, found);
                     for (std::uintptr_t address : found) {
                         if (std::find(addresses.begin(), addresses.end(), address) == addresses.end())
                             addresses.push_back(address);
@@ -589,8 +616,10 @@ void StoneModule::OnMenu()
         ImGui::Spacing();
 
         if (candidates_.empty()) {
-            ImGui::TextDisabled("Nothing found yet. Turn off any Cheat Engine script for this "
-                                "address first, then rescan.");
+            ImGui::TextDisabled("Turn any Cheat Engine script for this address off, then press "
+                                "Scan.");
+            if (ImGui::Button("Scan for the instruction"))
+                Scan();
         } else {
             std::vector<std::string> labels;
             for (const Candidate& candidate : candidates_) {
@@ -617,7 +646,13 @@ void StoneModule::OnMenu()
             ImGui::TextDisabled("starts at the first match");
         }
 
-        if (ImGui::Button("Rescan")) {
+        if (ImGui::Button("Scan again")) {
+            Scan();
+            app::MarkSettingsDirty();
+        }
+
+        if (ui::Toggle("Only scan BananaDrama.exe", &onlyGameExe_,
+                       "On: only the game exe is searched. Off: every non-Windows dll as well.")) {
             Scan();
             app::MarkSettingsDirty();
         }
@@ -660,6 +695,7 @@ void StoneModule::OnSave(json::Value& out) const
     out.set("amount", json::Value(amount_));
     out.set("looseMatch", json::Value(looseMatch_));
     out.set("scanAllMemory", json::Value(scanAllMemory_));
+    out.set("onlyGameExe", json::Value(onlyGameExe_));
     out.set("autoHook", json::Value(autoHook_));
     out.set("selected", json::Value(selected_));
 }
@@ -674,6 +710,8 @@ void StoneModule::OnLoad(const json::Value& in)
         looseMatch_ = v->asBool(looseMatch_);
     if (const json::Value* v = in.find("scanAllMemory"))
         scanAllMemory_ = v->asBool(scanAllMemory_);
+    if (const json::Value* v = in.find("onlyGameExe"))
+        onlyGameExe_ = v->asBool(onlyGameExe_);
     if (const json::Value* v = in.find("autoHook"))
         autoHook_ = v->asBool(autoHook_);
     if (const json::Value* v = in.find("selected"))
