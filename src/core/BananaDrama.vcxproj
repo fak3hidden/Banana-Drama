@@ -118,7 +118,7 @@
     <ClCompile Include="modules\module_manager.cpp" />
     <ClCompile Include="modules\overlay.cpp" />
     <ClCompile Include="modules\sandbox.cpp" />
-    <ClCompile Include="modules\stone.cpp" />
+    <ClCompile Include="modules\resource.cpp" />
     <ClCompile Include="ui\widgets.cpp" />
     <ClCompile Include="util\env.cpp" />
     <ClCompile Include="util\json.cpp" />

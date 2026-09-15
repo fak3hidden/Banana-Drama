@@ -133,7 +133,28 @@ tests/json_tests.cpp unit tests for the json module (not part of the solution)
 | Stone | boosts the stone counter when the game stores it |
 | Sandbox | one of every ImGui widget, a template for new modules |
 
-### Stone
+### Resources
+
+Five counters, all hooked the same way: the game stores each one with
+`mov [r15+offset], eax`, and the module diverts that instruction into a stub that
+adds an amount to `eax` before the store.
+
+| Module | Offset | Pattern | Status |
+| --- | --- | --- | --- |
+| Stone | `0x578` | `41 89 87 78 05 00 00` | confirmed with Cheat Engine |
+| Wood | `0x570` | `41 89 87 70 05 00 00 49 8B 47` | confirmed |
+| Bananas | `0x574` | `41 89 87 74 05 00 00 49 8B 47 40` | confirmed |
+| Silver bananas | `0x57C` | `41 89 87 7C 05 00 00` | **guessed** - no script yet |
+| Ruby bananas | `0x580` | `41 89 87 80 05 00 00` | **guessed** - no script yet |
+
+Wood and Bananas include the *following* instruction in the pattern, because
+seven bytes alone were not unique for Bananas (Cheat Engine said as much).
+
+Silver and Ruby are extrapolated: the confirmed counters sit four bytes apart
+(wood `0x570`, bananas `0x574`, stone `0x578`), so those are the next two slots.
+They are marked as guesses in the menu - check the match list before hooking.
+
+### How every resource module behaves
 
 Ported from the Cheat Engine table. It looks for
 

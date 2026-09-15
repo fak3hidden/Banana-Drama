@@ -1,4 +1,6 @@
-#include "stone.h"
+#include "resource.h"
+
+#include "module_manager.h"
 
 #include "../app.h"
 #include "../ui/widgets.h"
@@ -7,8 +9,10 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 #include <psapi.h>
@@ -21,8 +25,42 @@ namespace bd {
 namespace {
 
 // mov [r15+0x578], eax - the instruction the stone counter is stored with.
-constexpr std::uint8_t kPatternBytes[] = { 0x41, 0x89, 0x87, 0x78, 0x05, 0x00, 0x00 };
-constexpr std::size_t kPatchSize = sizeof(kPatternBytes);
+// mov [r15+disp32], eax - the seven bytes that get replaced. A pattern can be
+// longer than this: the extra bytes only make the scan unique, they are left
+// alone.
+constexpr std::size_t kInstructionSize = 7;
+
+// "41 89 87 70 05 00 00", for the log.
+std::string PatternText(const ResourceDef& def)
+{
+    std::string text;
+    char buffer[8];
+    for (std::size_t i = 0; i < def.patternSize; ++i) {
+        std::snprintf(buffer, sizeof(buffer), "%02X ", def.pattern[i]);
+        text += buffer;
+    }
+    if (!text.empty())
+        text.pop_back();
+    return text;
+}
+
+// Every message is tagged with the resource it came from (stone, wood, ...).
+void Trace(const ResourceDef& def, log::Level level, const char* format, ...)
+{
+    char message[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    const std::string line = std::string(def.id) + ": " + message;
+    switch (level) {
+    case log::Level::Debug:   log::Debug("%s", line.c_str()); break;
+    case log::Level::Info:    log::Info("%s", line.c_str()); break;
+    case log::Level::Warning: log::Warning("%s", line.c_str()); break;
+    case log::Level::Error:   log::Error("%s", line.c_str()); break;
+    }
+}
 constexpr std::size_t kStubSize = 64;
 constexpr std::int64_t kMaxJumpDistance = 0x7F000000;
 constexpr std::int64_t kAllocationStep = 0x10000;
@@ -94,8 +132,8 @@ void ScanRange(std::uint8_t* begin, std::size_t size, const std::vector<int>& pa
 
 // Reading is guarded by VirtualQuery, but a fault here would take the whole
 // game with it, so on MSVC the scan sits inside structured exception handling.
-bool SafeScanRange(std::uint8_t* begin, std::size_t size, const std::vector<int>& pattern,
-                   std::vector<std::uintptr_t>& out)
+bool SafeScanRange(const ResourceDef& def, std::uint8_t* begin, std::size_t size,
+                   const std::vector<int>& pattern, std::vector<std::uintptr_t>& out)
 {
 #ifdef _MSC_VER
     __try {
@@ -112,8 +150,8 @@ bool SafeScanRange(std::uint8_t* begin, std::size_t size, const std::vector<int>
 }
 
 // Scans the committed, executable pages of one module.
-void ScanModule(void* base, std::size_t size, const std::vector<int>& pattern,
-                std::vector<std::uintptr_t>& out)
+void ScanModule(const ResourceDef& def, void* base, std::size_t size,
+                const std::vector<int>& pattern, std::vector<std::uintptr_t>& out)
 {
     auto* region = static_cast<std::uint8_t*>(base);
     auto* const end = region + size;
@@ -129,10 +167,10 @@ void ScanModule(void* base, std::size_t size, const std::vector<int>& pattern,
                                PAGE_EXECUTE_WRITECOPY)) != 0;
 
         if (committed && executable && memory.RegionSize >= pattern.size()) {
-            if (!SafeScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize,
-                               pattern, out))
-                log::Warning("stone: could not read 0x%p, skipping that region",
-                             memory.BaseAddress);
+            if (!SafeScanRange(def, static_cast<std::uint8_t*>(memory.BaseAddress),
+                               memory.RegionSize, pattern, out))
+                Trace(def, log::Level::Warning, "could not read 0x%p, skipping that region",
+                      memory.BaseAddress);
         }
 
         region = static_cast<std::uint8_t*>(memory.BaseAddress) + memory.RegionSize;
@@ -227,17 +265,17 @@ std::string Describe(std::uintptr_t address, const std::vector<ModuleRange>& mod
 }
 
 // Writes what the scan sees into the log, once per session.
-void LogModuleDump(const std::vector<ModuleRange>& modules)
+void LogModuleDump(const ResourceDef& def, const std::vector<ModuleRange>& modules)
 {
     static bool done = false;
     if (done)
         return;
     done = true;
 
-    log::Info("stone: %zu modules loaded, looking for 41 89 87 78 05 00 00",
-              modules.size());
+    Trace(def, log::Level::Info, "%zu modules loaded, looking for %s", modules.size(),
+          PatternText(def).c_str());
     for (std::size_t i = 0; i < modules.size() && i < 40; ++i) {
-        log::Info("stone:   %s%s (base 0x%p, %llu KB)", ModuleName(modules[i].module).c_str(),
+        Trace(def, log::Level::Info, "  %s%s (base 0x%p, %llu KB)", ModuleName(modules[i].module).c_str(),
                   modules[i].system ? " [skipped: system]" : "",
                   reinterpret_cast<void*>(modules[i].begin),
                   static_cast<unsigned long long>((modules[i].end - modules[i].begin) / 1024));
@@ -339,47 +377,56 @@ void* AllocateNear(const void* target, std::size_t size)
 
 } // namespace
 
-StoneModule::StoneModule()
-    : Module("stone", "Stone",
-             "Adds to the stone counter whenever the game stores it (hook on mov [r15+0x578], eax).")
+ResourceModule::ResourceModule(const ResourceDef& def)
+    : Module(def.id, def.label, Description(def)), def_(def)
 {
 }
 
-StoneModule::~StoneModule()
+std::string ResourceModule::Description(const ResourceDef& def)
+{
+    char buffer[192];
+    std::snprintf(buffer, sizeof(buffer),
+                  "Adds to the %s counter whenever the game stores it (hook on mov "
+                  "[r15+0x%X], eax).",
+                  def.label, static_cast<unsigned>(def.offset));
+    return buffer;
+}
+
+ResourceModule::~ResourceModule()
 {
     Remove();
 }
 
-void StoneModule::OnEnable()
+void ResourceModule::OnEnable()
 {
     // Nothing happens by itself: scanning and hooking are both explicit button
     // presses, so a crash can always be traced to the step that caused it.
     if (autoHook_ && !candidates_.empty()) {
         if (Hook(candidates_[static_cast<std::size_t>(selected_)].address))
             return;
-        log::Warning("stone: auto-hook failed, pick a match by hand");
+        Trace(def_, log::Level::Warning, "auto-hook failed, pick a match by hand");
     }
 
     if (!installed_)
         status_ = "press Scan to look for the instruction";
 }
 
-void StoneModule::OnDisable()
+void ResourceModule::OnDisable()
 {
     Remove();
 }
 
-void StoneModule::OnFrame()
+void ResourceModule::OnFrame()
 {
     ++frames_;
 }
 
-void StoneModule::Scan()
+void ResourceModule::Scan()
 {
     candidates_.clear();
     selected_ = 0;
 
-    const std::vector<int> exact(kPatternBytes, kPatternBytes + kPatchSize);
+    const std::vector<int> exact(def_.pattern, def_.pattern + def_.patternSize);
     std::vector<std::uintptr_t> addresses;
 
     const std::vector<ModuleRange> modules = LoadedModules();
@@ -390,7 +437,8 @@ void StoneModule::Scan()
             continue;
         if (onlyGameExe_ && range.module != mainModule)
             continue;
-        ScanModule(reinterpret_cast<void*>(range.begin), range.end - range.begin, exact, addresses);
+        ScanModule(def_, reinterpret_cast<void*>(range.begin), range.end - range.begin, exact,
+                   addresses);
     }
 
     if (addresses.empty() && looseMatch_) {
@@ -402,7 +450,7 @@ void StoneModule::Scan()
                 continue;
             if (onlyGameExe_ && range.module != mainModule)
                 continue;
-            ScanModule(reinterpret_cast<void*>(range.begin), range.end - range.begin, loose,
+            ScanModule(def_, reinterpret_cast<void*>(range.begin), range.end - range.begin, loose,
                        addresses);
         }
     }
@@ -438,8 +486,8 @@ void StoneModule::Scan()
 
                 if (!skip) {
                     std::vector<std::uintptr_t> found;
-                    SafeScanRange(static_cast<std::uint8_t*>(memory.BaseAddress), memory.RegionSize,
-                                  exact, found);
+                    SafeScanRange(def_, static_cast<std::uint8_t*>(memory.BaseAddress),
+                                  memory.RegionSize, exact, found);
                     for (std::uintptr_t address : found) {
                         if (std::find(addresses.begin(), addresses.end(), address) == addresses.end())
                             addresses.push_back(address);
@@ -456,7 +504,7 @@ void StoneModule::Scan()
 
     monoDetected_ = GetModuleHandleW(L"mono-2.0-bdwgc.dll") != nullptr;
     if (monoDetected_)
-        log::Info("stone: Mono is loaded, so the game code is compiled at runtime - matches "
+        Trace(def_, log::Level::Info, "Mono is loaded, so the game code is compiled at runtime - matches "
                   "outside any module are listed first");
 
     // On Mono the counter lives in JIT'd code, so those come first: the same
@@ -478,13 +526,13 @@ void StoneModule::Scan()
         candidate.address = address;
         candidate.label = Describe(address, modules);
         candidates_.push_back(candidate);
-        log::Info("stone: match at %s", candidate.label.c_str());
+        Trace(def_, log::Level::Info, "match at %s", candidate.label.c_str());
     }
 
     if (candidates_.empty()) {
         status_ = "no match found (rescanning)";
-        log::Error("stone: no match, %zu modules scanned", modules.size());
-        LogModuleDump(modules);
+        Trace(def_, log::Level::Error, "no match, %zu modules scanned", modules.size());
+        LogModuleDump(def_, modules);
         return;
     }
 
@@ -494,12 +542,12 @@ void StoneModule::Scan()
     status_ = buffer;
 }
 
-bool StoneModule::Hook(std::uintptr_t address)
+bool ResourceModule::Hook(std::uintptr_t address)
 {
 #ifndef _WIN64
     (void)address;
     status_ = "64-bit only - build the x64 configuration";
-    log::Error("stone: this hook needs the 64-bit build");
+    Trace(def_, log::Level::Error, "this hook needs the 64-bit build");
     return false;
 #else
     if (installed_)
@@ -512,7 +560,7 @@ bool StoneModule::Hook(std::uintptr_t address)
     void* memory = AllocateNear(found, kStubSize);
     if (!memory) {
         status_ = "could not allocate memory near the game code";
-        log::Error("stone: no memory within 2 GB of 0x%p", static_cast<void*>(found));
+        Trace(def_, log::Level::Error, "no memory within 2 GB of 0x%p", static_cast<void*>(found));
         return false;
     }
 
@@ -530,8 +578,8 @@ bool StoneModule::Hook(std::uintptr_t address)
     std::memcpy(code + at, &amount, sizeof(amount));
     at += sizeof(amount);
 
-    std::memcpy(code + at, found, kPatchSize); // the original mov [r15+...], eax
-    at += kPatchSize;
+    std::memcpy(code + at, found, kInstructionSize); // the original mov [r15+...], eax
+    at += kInstructionSize;
 
     code[at++] = 0x58; // pop rax
     code[at++] = 0xFF; // jmp qword ptr [rip+0]
@@ -541,7 +589,7 @@ bool StoneModule::Hook(std::uintptr_t address)
     code[at++] = 0x00;
     code[at++] = 0x00;
 
-    const std::uint64_t back = reinterpret_cast<std::uint64_t>(found + kPatchSize);
+    const std::uint64_t back = reinterpret_cast<std::uint64_t>(found + kInstructionSize);
     std::memcpy(code + at, &back, sizeof(back));
     at += sizeof(back);
 
@@ -555,7 +603,7 @@ bool StoneModule::Hook(std::uintptr_t address)
         return false;
     }
 
-    std::uint8_t patch[kPatchSize];
+    std::uint8_t patch[kInstructionSize];
     const std::int32_t jump = static_cast<std::int32_t>(relative);
     patch[0] = 0xE9;
     std::memcpy(patch + 1, &jump, sizeof(jump));
@@ -565,28 +613,28 @@ bool StoneModule::Hook(std::uintptr_t address)
     DWORD protection = 0;
     {
         ThreadFreeze freeze;
-        if (freeze.IsBusy(found, kPatchSize)) {
+        if (freeze.IsBusy(found, kInstructionSize)) {
             status_ = "waiting for a safe moment";
             VirtualFree(memory, 0, MEM_RELEASE);
             return false;
         }
 
-        std::memcpy(original_, found, kPatchSize);
+        std::memcpy(original_, found, kInstructionSize);
 
-        if (!VirtualProtect(found, kPatchSize, PAGE_EXECUTE_READWRITE, &protection)) {
+        if (!VirtualProtect(found, kInstructionSize, PAGE_EXECUTE_READWRITE, &protection)) {
             VirtualFree(memory, 0, MEM_RELEASE);
             protection = 0;
             return false;
         }
 
-        std::memcpy(found, patch, kPatchSize);
-        VirtualProtect(found, kPatchSize, protection, &protection);
-        FlushInstructionCache(GetCurrentProcess(), found, kPatchSize);
+        std::memcpy(found, patch, kInstructionSize);
+        VirtualProtect(found, kInstructionSize, protection, &protection);
+        FlushInstructionCache(GetCurrentProcess(), found, kInstructionSize);
     }
 
     if (protection == 0) {
         status_ = "VirtualProtect failed";
-        log::Error("stone: VirtualProtect failed (%lu)", GetLastError());
+        Trace(def_, log::Level::Error, "VirtualProtect failed (%lu)", GetLastError());
         return false;
     }
 
@@ -599,13 +647,13 @@ bool StoneModule::Hook(std::uintptr_t address)
     std::snprintf(buffer, sizeof(buffer), "hooked at %s",
                   Describe(address, LoadedModules()).c_str());
     status_ = buffer;
-    log::Info("stone: hooked 0x%p (mode %s, amount %d)", static_cast<void*>(found),
+    Trace(def_, log::Level::Info, "hooked 0x%p (mode %s, amount %d)", static_cast<void*>(found),
               mode_ == Mode::Add ? "add" : "set", amount_);
     return true;
 #endif
 }
 
-void StoneModule::Remove()
+void ResourceModule::Remove()
 {
     if (!installed_ || !target_)
         return;
@@ -613,13 +661,13 @@ void StoneModule::Remove()
     ThreadFreeze freeze;
 
     DWORD protection = 0;
-    if (VirtualProtect(target_, kPatchSize, PAGE_EXECUTE_READWRITE, &protection)) {
-        std::memcpy(target_, original_, kPatchSize);
-        VirtualProtect(target_, kPatchSize, protection, &protection);
-        FlushInstructionCache(GetCurrentProcess(), target_, kPatchSize);
-        log::Info("stone: original bytes restored");
+    if (VirtualProtect(target_, kInstructionSize, PAGE_EXECUTE_READWRITE, &protection)) {
+        std::memcpy(target_, original_, kInstructionSize);
+        VirtualProtect(target_, kInstructionSize, protection, &protection);
+        FlushInstructionCache(GetCurrentProcess(), target_, kInstructionSize);
+        Trace(def_, log::Level::Info, "original bytes restored");
     } else {
-        log::Error("stone: could not restore the original bytes (%lu)", GetLastError());
+        Trace(def_, log::Level::Error, "could not restore the original bytes (%lu)", GetLastError());
     }
 
     // The stub is deliberately not freed: a thread can still be sitting in it.
@@ -629,7 +677,7 @@ void StoneModule::Remove()
     status_ = candidates_.empty() ? "not scanned yet" : "hook removed";
 }
 
-void StoneModule::Reinstall()
+void ResourceModule::Reinstall()
 {
     if (!installed_ || !target_)
         return;
@@ -638,7 +686,7 @@ void StoneModule::Reinstall()
     Hook(address);
 }
 
-void StoneModule::OnMenu()
+void ResourceModule::OnMenu()
 {
     if (installed_) {
         ImGui::TextColored(ImVec4(0.45f, 0.90f, 0.45f, 1.0f), "%s", status_.c_str());
@@ -739,10 +787,14 @@ void StoneModule::OnMenu()
     }
 
     ImGui::TextDisabled("%d frames since it was switched on", frames_);
+    if (def_.guessed)
+        ImGui::TextWrapped("No Cheat Engine script for this one: the offset is a guess, so "
+                           "check the match list before hooking.");
+
     ImGui::TextDisabled("Single-player / offline only.");
 }
 
-void StoneModule::OnSave(json::Value& out) const
+void ResourceModule::OnSave(json::Value& out) const
 {
     out.set("mode", json::Value(static_cast<int>(mode_)));
     out.set("amount", json::Value(amount_));
@@ -753,7 +805,7 @@ void StoneModule::OnSave(json::Value& out) const
     out.set("selected", json::Value(selected_));
 }
 
-void StoneModule::OnLoad(const json::Value& in)
+void ResourceModule::OnLoad(const json::Value& in)
 {
     if (const json::Value* v = in.find("mode"))
         mode_ = static_cast<Mode>(v->asInt(static_cast<int>(mode_)));
@@ -769,6 +821,42 @@ void StoneModule::OnLoad(const json::Value& in)
         autoHook_ = v->asBool(autoHook_);
     if (const json::Value* v = in.find("selected"))
         selected_ = v->asInt(selected_);
+}
+
+namespace {
+
+// mov [r15+0x578], eax - confirmed with Cheat Engine.
+constexpr std::uint8_t kStonePattern[] = { 0x41, 0x89, 0x87, 0x78, 0x05, 0x00, 0x00 };
+
+// mov [r15+0x570], eax plus the next instruction, mov rax,[r15+58]: the extra
+// bytes are what make this one unique.
+constexpr std::uint8_t kWoodPattern[] = { 0x41, 0x89, 0x87, 0x70, 0x05, 0x00, 0x00,
+                                          0x49, 0x8B, 0x47 };
+
+// mov [r15+0x574], eax plus mov rax,[r15+40]. Seven bytes were not unique here,
+// which is why the following instruction is part of the pattern.
+constexpr std::uint8_t kBananaPattern[] = { 0x41, 0x89, 0x87, 0x74, 0x05, 0x00, 0x00,
+                                            0x49, 0x8B, 0x47, 0x40 };
+
+// The counters sit next to each other (0x570 wood, 0x574 bananas, 0x578 stone),
+// so these two are the next slots along. Guessed, not confirmed.
+constexpr std::uint8_t kSilverPattern[] = { 0x41, 0x89, 0x87, 0x7C, 0x05, 0x00, 0x00 };
+constexpr std::uint8_t kRubyPattern[] = { 0x41, 0x89, 0x87, 0x80, 0x05, 0x00, 0x00 };
+
+const ResourceDef kResources[] = {
+    { "stone",   "Stone",          kStonePattern,  sizeof(kStonePattern),  0x578, false },
+    { "wood",    "Wood",           kWoodPattern,   sizeof(kWoodPattern),   0x570, false },
+    { "bananas", "Bananas",        kBananaPattern, sizeof(kBananaPattern), 0x574, false },
+    { "silver",  "Silver bananas", kSilverPattern, sizeof(kSilverPattern), 0x57C, true },
+    { "ruby",    "Ruby bananas",   kRubyPattern,   sizeof(kRubyPattern),   0x580, true },
+};
+
+} // namespace
+
+void RegisterResourceModules(ModuleManager& manager)
+{
+    for (const ResourceDef& def : kResources)
+        manager.Register(std::make_unique<ResourceModule>(def));
 }
 
 } // namespace bd

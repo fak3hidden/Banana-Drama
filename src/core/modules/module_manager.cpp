@@ -4,7 +4,7 @@
 
 #include "overlay.h"
 #include "sandbox.h"
-#include "stone.h"
+#include "resource.h"
 
 namespace bd {
 
@@ -85,7 +85,7 @@ void RegisterBuiltinModules(ModuleManager& manager)
 {
     manager.Register(std::make_unique<OverlayModule>());
     manager.Register(std::make_unique<SandboxModule>());
-    manager.Register(std::make_unique<StoneModule>());
+    RegisterResourceModules(manager);
 }
 
 } // namespace bd
