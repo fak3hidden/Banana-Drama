@@ -90,8 +90,7 @@ DWORD WINAPI MainThread(LPVOID)
     Sleep(150); // let the last Present call leave our code
 
     app::Shutdown();
-    FreeLibraryAndExitThread(g_module, 0);
-    return 0;
+    FreeLibraryAndExitThread(g_module, 0); // never returns
 }
 
 // ------------------------------------------------------------------ app layer

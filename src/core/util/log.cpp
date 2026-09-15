@@ -87,8 +87,8 @@ void Initialize(bool console, bool file)
 
             // Disabling the X button stops an accidental click from killing the game,
             // and QuickEdit stops a stray click from freezing the render thread.
-            if (const HWND console = GetConsoleWindow()) {
-                if (const HMENU menu = GetSystemMenu(console, FALSE))
+            if (const HWND consoleWindow = GetConsoleWindow()) {
+                if (const HMENU menu = GetSystemMenu(consoleWindow, FALSE))
                     EnableMenuItem(menu, SC_CLOSE, MF_BYCOMMAND | MF_DISABLED | MF_GRAYED);
             }
             if (const HANDLE input = GetStdHandle(STD_INPUT_HANDLE)) {

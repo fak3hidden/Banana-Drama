@@ -48,6 +48,11 @@ if not defined MSBUILD (
 echo Using %MSBUILD%
 echo.
 
+REM mspdbsrv.exe and a stale pdb are the usual cause of LNK1201 when building
+REM with multiple cores, so get rid of both before starting.
+taskkill /f /im mspdbsrv.exe >nul 2>&1
+if exist "build\%PLATFORM%\%CONFIG%\*.pdb" del /q "build\%PLATFORM%\%CONFIG%\*.pdb" >nul 2>&1
+
 "%MSBUILD%" BananaDrama.sln /t:Build /p:Configuration=%CONFIG% /p:Platform=%PLATFORM% /m /v:minimal /nologo
 
 if errorlevel 1 (
