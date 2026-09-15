@@ -6,8 +6,11 @@ REM   compile.bat                 Release x64 (default)
 REM   compile.bat Debug           Debug x64
 REM   compile.bat Release Win32   32-bit build
 REM
-REM The old dll is deleted first and everything is rebuilt from scratch, so a
-REM dll on disk is always from the sources that are on disk right now.
+REM The old dll is deleted first and everything is rebuilt from scratch, so the
+REM dll on disk is always built from the sources on disk right now.
+REM
+REM Note: nothing in this script puts a path inside a ( ... ) block, because a
+REM folder name with brackets like "Banana-Drama(4)" would end the block early.
 
 pushd "%~dp0"
 
@@ -22,41 +25,34 @@ echo   Folder: %CD%
 echo.
 
 set "OUT=%CD%\build\%PLATFORM%\%CONFIG%"
-
-REM Print when the sources were last changed, so a failed update.bat is obvious:
-REM if this is later than the dll below, the download did not replace anything.
+set "BD_SRC=%CD%\src"
 set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
-if exist "%PS%" (
-    "%PS%" -NoProfile -ExecutionPolicy Bypass -Command "$s=Get-ChildItem -Path '%CD%\src' -Recurse -Include *.cpp,*.h -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if($s){ Write-Host ('  Newest source : ' + $s.LastWriteTime + '   ' + $s.Name) }"
-)
+
+REM When the sources were last changed. If this is later than Built below,
+REM update.bat did not replace anything.
+if not exist "%PS%" goto :nosrccheck
+"%PS%" -NoProfile -ExecutionPolicy Bypass -Command "$s=Get-ChildItem -Path $env:BD_SRC -Recurse -Include *.cpp,*.h -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if($s){ Write-Host ('  Newest source : ' + $s.LastWriteTime + '   ' + $s.Name) }"
+:nosrccheck
 
 set "MSBUILD="
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
-if exist "%VSWHERE%" (
-    for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath`) do set "VSINSTALL=%%i"
-)
+if exist "%VSWHERE%" for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath`) do set "VSINSTALL=%%i"
 
-if defined VSINSTALL (
-    if exist "%VSINSTALL%\MSBuild\Current\Bin\MSBuild.exe" set "MSBUILD=%VSINSTALL%\MSBuild\Current\Bin\MSBuild.exe"
-)
+if defined VSINSTALL if exist "%VSINSTALL%\MSBuild\Current\Bin\MSBuild.exe" set "MSBUILD=%VSINSTALL%\MSBuild\Current\Bin\MSBuild.exe"
 
-if not defined MSBUILD (
-    where msbuild >nul 2>nul
-    if not errorlevel 1 (
-        for /f "delims=" %%i in ('where msbuild') do if not defined MSBUILD set "MSBUILD=%%i"
-    )
-)
+if not defined MSBUILD where msbuild >nul 2>nul
+if not defined MSBUILD if not errorlevel 1 for /f "delims=" %%i in ('where msbuild') do if not defined MSBUILD set "MSBUILD=%%i"
 
-if not defined MSBUILD (
-    echo Could not find MSBuild.
-    echo.
-    echo Install Visual Studio 2022 with the "Desktop development with C++"
-    echo workload, or run this from a Developer Command Prompt.
-    echo.
-    pause
-    exit /b 1
-)
+if defined MSBUILD goto :foundmsbuild
+echo   Could not find MSBuild.
+echo.
+echo   Install Visual Studio 2022 with the "Desktop development with C++"
+echo   workload, or run this from a Developer Command Prompt.
+echo.
+pause
+exit /b 1
+:foundmsbuild
 
 echo   Using %MSBUILD%
 echo.
@@ -73,22 +69,22 @@ if exist "%OUT%\BananaDrama.Injector.exe" del /q "%OUT%\BananaDrama.Injector.exe
 
 "%MSBUILD%" BananaDrama.sln /t:Rebuild /p:Configuration=%CONFIG% /p:Platform=%PLATFORM% /m /v:minimal /nologo
 
-if errorlevel 1 (
-    echo.
-    echo   BUILD FAILED - scroll up for the first error.
-    echo   The old dll was deleted, so there is nothing to inject.
-    echo.
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto :builtok
+echo.
+echo   BUILD FAILED - scroll up for the first error.
+echo   The old dll was deleted, so there is nothing to inject.
+echo.
+pause
+exit /b 1
+:builtok
 
-if not exist "%OUT%\BananaDrama.dll" (
-    echo.
-    echo   BUILD FAILED - BananaDrama.dll was not produced.
-    echo.
-    pause
-    exit /b 1
-)
+if exist "%OUT%\BananaDrama.dll" goto :havedll
+echo.
+echo   BUILD FAILED - BananaDrama.dll was not produced.
+echo.
+pause
+exit /b 1
+:havedll
 
 echo.
 echo   BUILD OK

@@ -427,7 +427,6 @@ void StoneModule::Scan()
 
             if (memory.State == MEM_COMMIT && executable && memory.RegionSize >= exact.size()) {
                 const auto begin = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
-                const auto end = begin + memory.RegionSize;
 
                 bool skip = false;
                 for (const ModuleRange& range : modules) {
