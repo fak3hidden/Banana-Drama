@@ -228,6 +228,7 @@ void DrawDebugTab()
 
     ui::Section("Overlay");
     ui::KeyValue("Dear ImGui", IMGUI_VERSION);
+    ui::KeyValue("Built", (std::string(__DATE__) + " " + __TIME__).c_str());
     std::snprintf(buffer, sizeof(buffer), "%.0f fps (%.2f ms)", ImGui::GetIO().Framerate,
                   1000.0f / std::max(1.0f, ImGui::GetIO().Framerate));
     ui::KeyValue("Frame", buffer);

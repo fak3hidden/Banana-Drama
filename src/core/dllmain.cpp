@@ -115,6 +115,7 @@ void Initialize(HMODULE module)
     log::Initialize(g_settings.consoleEnabled, g_settings.logToFile);
 
     log::Info("Banana Drama loaded (%s)", paths::ModulePath().c_str());
+    log::Info("build: %s %s", __DATE__, __TIME__);
     log::Info("config: %s", config::Path().c_str());
     log::Info("config: %s", loaded ? "loaded" : "no file yet, using defaults");
 

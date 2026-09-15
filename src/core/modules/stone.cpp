@@ -39,10 +39,22 @@ std::string ModuleName(HMODULE module)
     return std::filesystem::path(Narrow(path)).filename().string();
 }
 
+// A pattern byte of -1 matches anything.
+bool MatchesHere(const std::uint8_t* data, const std::vector<int>& pattern)
+{
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        if (pattern[i] < 0)
+            continue;
+        if (data[i] != static_cast<std::uint8_t>(pattern[i]))
+            return false;
+    }
+    return true;
+}
+
 // Scans the committed, executable pages of one module. Reading the mapped image
 // is what Cheat Engine does too, and skipping non-committed pages keeps it from
 // touching gaps.
-std::uint8_t* ScanModule(void* base, std::size_t size)
+std::uint8_t* ScanModule(void* base, std::size_t size, const std::vector<int>& pattern)
 {
     auto* region = static_cast<std::uint8_t*>(base);
     auto* const end = region + size;
@@ -57,11 +69,11 @@ std::uint8_t* ScanModule(void* base, std::size_t size)
             (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                                PAGE_EXECUTE_WRITECOPY)) != 0;
 
-        if (committed && executable && memory.RegionSize >= kPatchSize) {
+        if (committed && executable && memory.RegionSize >= pattern.size()) {
             auto* begin = static_cast<std::uint8_t*>(memory.BaseAddress);
-            const std::size_t size = memory.RegionSize;
-            for (std::size_t offset = 0; offset + kPatchSize <= size; ++offset) {
-                if (std::memcmp(begin + offset, kPatternBytes, kPatchSize) == 0)
+            const std::size_t regionSize = memory.RegionSize;
+            for (std::size_t offset = 0; offset + pattern.size() <= regionSize; ++offset) {
+                if (MatchesHere(begin + offset, pattern))
                     return begin + offset;
             }
         }
@@ -74,7 +86,7 @@ std::uint8_t* ScanModule(void* base, std::size_t size)
 // Every loaded module, not just the exe: with IL2CPP or Mono the game code lives
 // in GameAssembly.dll or another dll, which is where the Cheat Engine aobscan
 // finds this instruction.
-std::vector<Hit> FindPattern(int* scannedModules)
+std::vector<Hit> FindPattern(const std::vector<int>& pattern, int* scannedModules)
 {
     std::vector<Hit> hits;
     if (scannedModules)
@@ -98,7 +110,7 @@ std::vector<Hit> FindPattern(int* scannedModules)
 
         if (scannedModules)
             ++*scannedModules;
-        if (std::uint8_t* found = ScanModule(info.lpBaseOfDll, info.SizeOfImage))
+        if (std::uint8_t* found = ScanModule(info.lpBaseOfDll, info.SizeOfImage, pattern))
             hits.push_back({ modules[i], found });
     }
     return hits;
@@ -168,13 +180,28 @@ bool StoneModule::Install()
     log::Error("stone: this hook needs the 64-bit build");
     return false;
 #else
+    // Exact bytes first, then any "mov [r15+something], eax" in case the game
+    // moved the counter: the stub replays the original instruction, so a
+    // different displacement still works.
+    const std::vector<int> exact(kPatternBytes, kPatternBytes + kPatchSize);
+    const std::vector<int> relaxed = { 0x41, 0x89, 0x87, -1, -1, 0x00, 0x00 };
+
     int scanned = 0;
-    const std::vector<Hit> hits = FindPattern(&scanned);
+    std::vector<Hit> hits = FindPattern(exact, &scanned);
+    bool relaxedMatch = false;
+    if (hits.empty()) {
+        hits = FindPattern(relaxed, nullptr);
+        relaxedMatch = !hits.empty();
+    }
+
     if (hits.empty()) {
         status_ = "pattern not found (retrying)";
         log::Error("stone: instruction not found in %d loaded modules", scanned);
         return false;
     }
+    if (relaxedMatch)
+        log::Warning("stone: exact offset 0x578 was not found, using a relaxed match - "
+                     "check that it is still the stone counter");
 
     std::size_t index = 0;
     for (std::size_t i = 0; i < hits.size(); ++i) {
@@ -265,7 +292,7 @@ bool StoneModule::Install()
 
     installed_ = true;
 
-    char buffer[160];
+    char buffer[192];
     std::snprintf(buffer, sizeof(buffer), "hooked in %s at +0x%llX",
                   ModuleName(module_).c_str(),
                   static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(found) -
