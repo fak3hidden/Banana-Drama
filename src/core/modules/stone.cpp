@@ -86,6 +86,36 @@ std::uint8_t* ScanModule(void* base, std::size_t size, const std::vector<int>& p
 // Every loaded module, not just the exe: with IL2CPP or Mono the game code lives
 // in GameAssembly.dll or another dll, which is where the Cheat Engine aobscan
 // finds this instruction.
+// Writes what the scan is actually looking at to the log, once per session.
+void LogModuleDump()
+{
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+
+    HMODULE modules[1024]{};
+    DWORD needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) {
+        log::Error("stone: EnumProcessModules failed (%lu)", GetLastError());
+        return;
+    }
+
+    const DWORD count = needed / sizeof(HMODULE);
+    log::Info("stone: %lu modules loaded, looking for 41 89 87 78 05 00 00 "
+              "(and 41 89 87 ?? ?? 00 00)", static_cast<unsigned long>(count));
+
+    for (DWORD i = 0; i < count && i < 1024 && i < 40; ++i) {
+        MODULEINFO info{};
+        if (!GetModuleInformation(GetCurrentProcess(), modules[i], &info, sizeof(info)))
+            continue;
+        log::Info("stone:   %s (0x%llX, %lu KB, base 0x%p)", ModuleName(modules[i]).c_str(),
+                  static_cast<unsigned long long>(info.SizeOfImage),
+                  static_cast<unsigned long>(info.SizeOfImage / 1024),
+                  info.lpBaseOfDll);
+    }
+}
+
 std::vector<Hit> FindPattern(const std::vector<int>& pattern, int* scannedModules)
 {
     std::vector<Hit> hits;
@@ -197,6 +227,7 @@ bool StoneModule::Install()
     if (hits.empty()) {
         status_ = "pattern not found (retrying)";
         log::Error("stone: instruction not found in %d loaded modules", scanned);
+        LogModuleDump();
         return false;
     }
     if (relaxedMatch)
@@ -222,7 +253,9 @@ bool StoneModule::Install()
     void* memory = AllocateNear(found, kStubSize);
     if (!memory) {
         status_ = "could not allocate memory near the game code";
-        log::Error("stone: no memory within 2 GB of the instruction");
+        log::Error("stone: no memory within 2 GB of the instruction at 0x%p",
+                   static_cast<void*>(found));
+        LogModuleDump();
         target_ = nullptr;
         return false;
     }
