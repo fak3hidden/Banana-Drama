@@ -25,10 +25,10 @@ namespace bd {
 namespace {
 
 // mov [r15+0x578], eax - the instruction the stone counter is stored with.
-// mov [r15+disp32], eax - the seven bytes that get replaced. A pattern can be
-// longer than this: the extra bytes only make the scan unique, they are left
-// alone.
-constexpr std::size_t kInstructionSize = 7;
+// The longest store we replace: mov [r15+disp32], eax is seven bytes,
+// mov [rax+disp32], ecx is six. A pattern can be longer than the instruction:
+// the extra bytes only make the scan unique, they are left alone.
+constexpr std::size_t kMaxInstructionSize = 7;
 
 // "41 89 87 70 05 00 00", for the log.
 std::string PatternText(const ResourceDef& def)
@@ -442,9 +442,16 @@ void ResourceModule::Scan()
     }
 
     if (addresses.empty() && looseMatch_) {
-        // Any "mov [r15+disp32], eax": the stub replays the original bytes, so a
-        // moved counter still works - but it can also hit the wrong value.
-        const std::vector<int> loose = { 0x41, 0x89, 0x87, -1, -1, 0x00, 0x00 };
+        // Any store of this shape with a different offset: the stub replays the
+        // original bytes, so a moved counter still works - but it can also hit
+        // the wrong value.
+        std::vector<int> loose;
+        for (std::size_t i = 0; i + 4 < def_.instructionSize; ++i)
+            loose.push_back(def_.pattern[i]);
+        loose.push_back(-1);
+        loose.push_back(-1);
+        loose.push_back(0x00);
+        loose.push_back(0x00);
         for (const ModuleRange& range : modules) {
             if (range.module == bd::g_module || range.system)
                 continue;
@@ -564,24 +571,27 @@ bool ResourceModule::Hook(std::uintptr_t address)
         return false;
     }
 
+    const std::size_t instructionSize = def_.instructionSize;
+    const bool useEcx = def_.value == ValueReg::Ecx;
+
     auto* code = static_cast<std::uint8_t*>(memory);
     std::size_t at = 0;
 
-    code[at++] = 0x50; // push rax
+    code[at++] = useEcx ? 0x51 : 0x50; // push rcx / push rax
     if (mode_ == Mode::Add) {
-        code[at++] = 0x8D; // lea eax, [rax + amount] (does not touch the flags)
-        code[at++] = 0x80;
-    } else {
-        code[at++] = 0xB8; // mov eax, amount
+        code[at++] = 0x8D;                          // lea eax, [rax + amount]
+        code[at++] = useEcx ? 0x89 : 0x80;          // lea ecx, [rcx + amount]
+    } else {                                        // (lea leaves the flags alone)
+        code[at++] = useEcx ? 0xB9 : 0xB8; // mov ecx, amount / mov eax, amount
     }
     const std::int32_t amount = static_cast<std::int32_t>(amount_);
     std::memcpy(code + at, &amount, sizeof(amount));
     at += sizeof(amount);
 
-    std::memcpy(code + at, found, kInstructionSize); // the original mov [r15+...], eax
-    at += kInstructionSize;
+    std::memcpy(code + at, found, instructionSize); // the original store
+    at += instructionSize;
 
-    code[at++] = 0x58; // pop rax
+    code[at++] = useEcx ? 0x59 : 0x58; // pop rcx / pop rax
     code[at++] = 0xFF; // jmp qword ptr [rip+0]
     code[at++] = 0x25;
     code[at++] = 0x00;
@@ -589,7 +599,7 @@ bool ResourceModule::Hook(std::uintptr_t address)
     code[at++] = 0x00;
     code[at++] = 0x00;
 
-    const std::uint64_t back = reinterpret_cast<std::uint64_t>(found + kInstructionSize);
+    const std::uint64_t back = reinterpret_cast<std::uint64_t>(found + instructionSize);
     std::memcpy(code + at, &back, sizeof(back));
     at += sizeof(back);
 
@@ -603,33 +613,33 @@ bool ResourceModule::Hook(std::uintptr_t address)
         return false;
     }
 
-    std::uint8_t patch[kInstructionSize];
+    std::uint8_t patch[kMaxInstructionSize]{};
     const std::int32_t jump = static_cast<std::int32_t>(relative);
     patch[0] = 0xE9;
     std::memcpy(patch + 1, &jump, sizeof(jump));
-    patch[5] = 0x90;
-    patch[6] = 0x90;
+    for (std::size_t i = 5; i < instructionSize; ++i)
+        patch[i] = 0x90;
 
     DWORD protection = 0;
     {
         ThreadFreeze freeze;
-        if (freeze.IsBusy(found, kInstructionSize)) {
+        if (freeze.IsBusy(found, instructionSize)) {
             status_ = "waiting for a safe moment";
             VirtualFree(memory, 0, MEM_RELEASE);
             return false;
         }
 
-        std::memcpy(original_, found, kInstructionSize);
+        std::memcpy(original_, found, instructionSize);
 
-        if (!VirtualProtect(found, kInstructionSize, PAGE_EXECUTE_READWRITE, &protection)) {
+        if (!VirtualProtect(found, instructionSize, PAGE_EXECUTE_READWRITE, &protection)) {
             VirtualFree(memory, 0, MEM_RELEASE);
             protection = 0;
             return false;
         }
 
-        std::memcpy(found, patch, kInstructionSize);
-        VirtualProtect(found, kInstructionSize, protection, &protection);
-        FlushInstructionCache(GetCurrentProcess(), found, kInstructionSize);
+        std::memcpy(found, patch, instructionSize);
+        VirtualProtect(found, instructionSize, protection, &protection);
+        FlushInstructionCache(GetCurrentProcess(), found, instructionSize);
     }
 
     if (protection == 0) {
@@ -658,13 +668,14 @@ void ResourceModule::Remove()
     if (!installed_ || !target_)
         return;
 
+    const std::size_t instructionSize = def_.instructionSize;
     ThreadFreeze freeze;
 
     DWORD protection = 0;
-    if (VirtualProtect(target_, kInstructionSize, PAGE_EXECUTE_READWRITE, &protection)) {
-        std::memcpy(target_, original_, kInstructionSize);
-        VirtualProtect(target_, kInstructionSize, protection, &protection);
-        FlushInstructionCache(GetCurrentProcess(), target_, kInstructionSize);
+    if (VirtualProtect(target_, instructionSize, PAGE_EXECUTE_READWRITE, &protection)) {
+        std::memcpy(target_, original_, instructionSize);
+        VirtualProtect(target_, instructionSize, protection, &protection);
+        FlushInstructionCache(GetCurrentProcess(), target_, instructionSize);
         Trace(def_, log::Level::Info, "original bytes restored");
     } else {
         Trace(def_, log::Level::Error, "could not restore the original bytes (%lu)", GetLastError());
@@ -838,17 +849,20 @@ constexpr std::uint8_t kWoodPattern[] = { 0x41, 0x89, 0x87, 0x70, 0x05, 0x00, 0x
 constexpr std::uint8_t kBananaPattern[] = { 0x41, 0x89, 0x87, 0x74, 0x05, 0x00, 0x00,
                                             0x49, 0x8B, 0x47, 0x40 };
 
-// The counters sit next to each other (0x570 wood, 0x574 bananas, 0x578 stone),
-// so these two are the next slots along. Guessed, not confirmed.
-constexpr std::uint8_t kSilverPattern[] = { 0x41, 0x89, 0x87, 0x7C, 0x05, 0x00, 0x00 };
-constexpr std::uint8_t kRubyPattern[] = { 0x41, 0x89, 0x87, 0x80, 0x05, 0x00, 0x00 };
+// Silver and ruby are stored differently: mov [rax+disp32], ecx, six bytes with
+// the value in ecx rather than eax. Both patterns include the instruction that
+// follows (mov rax,[rsi+18]) because six bytes alone are not unique.
+constexpr std::uint8_t kSilverPattern[] = { 0x89, 0x88, 0x80, 0x05, 0x00, 0x00, 0x48,
+                                            0x8B, 0x46 };
+constexpr std::uint8_t kRubyPattern[] = { 0x89, 0x88, 0x7C, 0x05, 0x00, 0x00, 0x48,
+                                          0x8B, 0x46, 0x18 };
 
 const ResourceDef kResources[] = {
-    { "stone",   "Stone",          kStonePattern,  sizeof(kStonePattern),  0x578, false },
-    { "wood",    "Wood",           kWoodPattern,   sizeof(kWoodPattern),   0x570, false },
-    { "bananas", "Bananas",        kBananaPattern, sizeof(kBananaPattern), 0x574, false },
-    { "silver",  "Silver bananas", kSilverPattern, sizeof(kSilverPattern), 0x57C, true },
-    { "ruby",    "Ruby bananas",   kRubyPattern,   sizeof(kRubyPattern),   0x580, true },
+    { "stone",   "Stone",          kStonePattern,  sizeof(kStonePattern),  7, ValueReg::Eax, 0x578, false },
+    { "wood",    "Wood",           kWoodPattern,   sizeof(kWoodPattern),   7, ValueReg::Eax, 0x570, false },
+    { "bananas", "Bananas",        kBananaPattern, sizeof(kBananaPattern), 7, ValueReg::Eax, 0x574, false },
+    { "silver",  "Silver bananas", kSilverPattern, sizeof(kSilverPattern), 6, ValueReg::Ecx, 0x580, false },
+    { "ruby",    "Ruby bananas",   kRubyPattern,   sizeof(kRubyPattern),   6, ValueReg::Ecx, 0x57C, false },
 };
 
 } // namespace

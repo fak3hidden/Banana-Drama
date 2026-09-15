@@ -19,11 +19,21 @@ class ModuleManager;
 //
 // A pattern can be longer than the seven bytes that get replaced: the extra
 // bytes are only there to make the scan unique, they are never modified.
+// Which register holds the value on its way into the counter.
+enum class ValueReg { Eax, Ecx };
+
 struct ResourceDef {
     const char* id = "";
     const char* label = "";
     const std::uint8_t* pattern = nullptr;
     std::size_t patternSize = 0;
+
+    // How many bytes the store takes, and therefore how many get replaced:
+    // 7 for mov [r15+disp32], eax   (41 89 87 .. .. .. ..)
+    // 6 for mov [rax+disp32], ecx   (89 88 .. .. .. ..)
+    std::size_t instructionSize = 7;
+    ValueReg value = ValueReg::Eax;
+
     std::uint32_t offset = 0;  // the field offset, shown in the menu and the log
     bool guessed = false;      // no Cheat Engine script confirmed this one
 };

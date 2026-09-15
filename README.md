@@ -139,20 +139,29 @@ Five counters, all hooked the same way: the game stores each one with
 `mov [r15+offset], eax`, and the module diverts that instruction into a stub that
 adds an amount to `eax` before the store.
 
-| Module | Offset | Pattern | Status |
-| --- | --- | --- | --- |
-| Stone | `0x578` | `41 89 87 78 05 00 00` | confirmed with Cheat Engine |
-| Wood | `0x570` | `41 89 87 70 05 00 00 49 8B 47` | confirmed |
-| Bananas | `0x574` | `41 89 87 74 05 00 00 49 8B 47 40` | confirmed |
-| Silver bananas | `0x57C` | `41 89 87 7C 05 00 00` | **guessed** - no script yet |
-| Ruby bananas | `0x580` | `41 89 87 80 05 00 00` | **guessed** - no script yet |
+There are two shapes of store in this game, and the module handles both:
 
-Wood and Bananas include the *following* instruction in the pattern, because
-seven bytes alone were not unique for Bananas (Cheat Engine said as much).
+```
+mov [r15+disp32], eax    41 89 87 .. .. .. ..   7 bytes   wood, bananas, stone
+mov [rax+disp32], ecx    89 88 .. .. .. ..      6 bytes   silver, ruby bananas
+```
 
-Silver and Ruby are extrapolated: the confirmed counters sit four bytes apart
-(wood `0x570`, bananas `0x574`, stone `0x578`), so those are the next two slots.
-They are marked as guesses in the menu - check the match list before hooking.
+The value arrives in `eax` for the first shape and in `ecx` for the second, so
+the stub adjusts whichever register that counter uses and puts it back
+afterwards, leaving the flags alone.
+
+| Module | Offset | Store | Pattern | Status |
+| --- | --- | --- | --- | --- |
+| Stone | `0x578` | `[r15+0x578], eax` | `41 89 87 78 05 00 00` | confirmed |
+| Wood | `0x570` | `[r15+0x570], eax` | `41 89 87 70 05 00 00 49 8B 47` | confirmed |
+| Bananas | `0x574` | `[r15+0x574], eax` | `41 89 87 74 05 00 00 49 8B 47 40` | confirmed |
+| Silver bananas | `0x580` | `[rax+0x580], ecx` | `89 88 80 05 00 00 48 8B 46` | confirmed |
+| Ruby bananas | `0x57C` | `[rax+0x57C], ecx` | `89 88 7C 05 00 00 48 8B 46 18` | confirmed |
+
+Wood, bananas and both banana types include the *following* instruction in
+their pattern: Cheat Engine reported that six or seven bytes on their own were
+not unique. Only the store itself is replaced - the extra bytes are never
+modified.
 
 ### How every resource module behaves
 
