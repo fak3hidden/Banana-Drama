@@ -164,6 +164,16 @@ Options:
 - **Loose match** - any `mov [r15+disp32], eax`, for when a patch moves the counter
 - **Auto-hook** - hook straight away instead of asking
 
+**This game runs on Mono.** `mono-2.0-bdwgc.dll` is loaded, which means the game
+code is compiled while you play and lives in allocated memory, not inside any
+dll. Consequences:
+
+- **Scan all memory** is on by default, and matches outside every module (shown
+  as `jit 0x...+0x...`) are listed *first* - that is where the counter is
+- **the instruction only exists once the code has run**: pick up or spend a
+  stone before pressing Scan, otherwise there is nothing to find
+- it can move between sessions, so expect to pick a match each time
+
 **Turn any Cheat Engine script for this address off first.** While CE's script
 is enabled those bytes are already replaced by CE's jump, so the scan finds a
 different copy (often the copy inside CE's own code cave) and hooking that

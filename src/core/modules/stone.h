@@ -50,8 +50,9 @@ private:
     Mode mode_ = Mode::Add;
     int amount_ = 999999;
     bool looseMatch_ = false;      // any mov [r15+disp32], eax, not just 0x578
-    bool scanAllMemory_ = false;   // include JIT'd / allocated code, like CE's aobscan
-    bool onlyGameExe_ = true;      // only search BananaDrama.exe, not every dll
+    bool scanAllMemory_ = true;    // include JIT'd code - Mono compiles the game at runtime
+    bool onlyGameExe_ = false;     // the instruction is rarely in the exe on Mono
+    bool monoDetected_ = false;    // mono-2.0-bdwgc.dll: game code is JIT'd
     bool autoHook_ = false;        // hook without asking first
 
     std::vector<Candidate> candidates_;

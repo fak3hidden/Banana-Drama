@@ -180,6 +180,31 @@ std::string LabelFor(std::uintptr_t address, const std::vector<ModuleRange>& mod
     return "memory";
 }
 
+// Mono keeps its compiled code in allocated memory, so a match outside every
+// module is described by the region it sits in.
+HMODULE GetModuleByBase(const std::vector<ModuleRange>& modules, std::uintptr_t base)
+{
+    for (const ModuleRange& range : modules) {
+        if (range.begin == base)
+            return range.module;
+    }
+    return nullptr;
+}
+
+std::string JitLabel(std::uintptr_t address)
+{
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!VirtualQuery(reinterpret_cast<void*>(address), &memory, sizeof(memory)))
+        return "memory";
+
+    const auto base = reinterpret_cast<std::uintptr_t>(memory.AllocationBase);
+    char buffer[96];
+    std::snprintf(buffer, sizeof(buffer), "jit 0x%llX+0x%llX",
+                  static_cast<unsigned long long>(base),
+                  static_cast<unsigned long long>(address - base));
+    return buffer;
+}
+
 std::uintptr_t BaseFor(std::uintptr_t address, const std::vector<ModuleRange>& modules)
 {
     for (const ModuleRange& range : modules) {
@@ -187,6 +212,18 @@ std::uintptr_t BaseFor(std::uintptr_t address, const std::vector<ModuleRange>& m
             return range.begin;
     }
     return 0;
+}
+
+std::string Describe(std::uintptr_t address, const std::vector<ModuleRange>& modules)
+{
+    const std::uintptr_t base = BaseFor(address, modules);
+    char buffer[128];
+    if (base == 0)
+        return JitLabel(address);
+
+    std::snprintf(buffer, sizeof(buffer), "%s+0x%llX", ModuleName(GetModuleByBase(modules, base)).c_str(),
+                  static_cast<unsigned long long>(address - base));
+    return buffer;
 }
 
 // Writes what the scan sees into the log, once per session.
@@ -416,16 +453,33 @@ void StoneModule::Scan()
     }
 
     std::sort(addresses.begin(), addresses.end());
+    addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
 
+    monoDetected_ = GetModuleHandleW(L"mono-2.0-bdwgc.dll") != nullptr;
+    if (monoDetected_)
+        log::Info("stone: Mono is loaded, so the game code is compiled at runtime - matches "
+                  "outside any module are listed first");
+
+    // On Mono the counter lives in JIT'd code, so those come first: the same
+    // bytes inside a dll are almost always an unrelated store.
+    std::vector<std::uintptr_t> ordered;
     for (std::uintptr_t address : addresses) {
+        if (BaseFor(address, modules) == 0)
+            ordered.push_back(address);
+    }
+    for (std::uintptr_t address : addresses) {
+        if (BaseFor(address, modules) != 0)
+            ordered.push_back(address);
+    }
+
+    for (std::uintptr_t address : ordered) {
         if (candidates_.size() >= kMaxCandidates)
             break;
         Candidate candidate;
         candidate.address = address;
-        candidate.label = LabelFor(address, modules);
+        candidate.label = Describe(address, modules);
         candidates_.push_back(candidate);
-        log::Info("stone: match in %s at 0x%p", candidate.label.c_str(),
-                  reinterpret_cast<void*>(address));
+        log::Info("stone: match at %s", candidate.label.c_str());
     }
 
     if (candidates_.empty()) {
@@ -542,11 +596,9 @@ bool StoneModule::Hook(std::uintptr_t address)
     stubSize_ = kStubSize;
     installed_ = true;
 
-    const std::vector<ModuleRange> modules = LoadedModules();
     char buffer[192];
-    std::snprintf(buffer, sizeof(buffer), "hooked at %s+0x%llX",
-                  LabelFor(address, modules).c_str(),
-                  static_cast<unsigned long long>(address - BaseFor(address, modules)));
+    std::snprintf(buffer, sizeof(buffer), "hooked at %s",
+                  Describe(address, LoadedModules()).c_str());
     status_ = buffer;
     log::Info("stone: hooked 0x%p (mode %s, amount %d)", static_cast<void*>(found),
               mode_ == Mode::Add ? "add" : "set", amount_);
@@ -616,18 +668,20 @@ void StoneModule::OnMenu()
         ImGui::Spacing();
 
         if (candidates_.empty()) {
-            ImGui::TextDisabled("Turn any Cheat Engine script for this address off, then press "
-                                "Scan.");
+            if (monoDetected_)
+                ImGui::TextWrapped("This game runs on Mono, so the code is compiled while you "
+                                   "play: pick up or spend a stone first, then press Scan, or the "
+                                   "instruction does not exist yet. Any Cheat Engine script for "
+                                   "this address must be turned off.");
+            else
+                ImGui::TextDisabled("Turn any Cheat Engine script for this address off, then "
+                                    "press Scan.");
             if (ImGui::Button("Scan for the instruction"))
                 Scan();
         } else {
             std::vector<std::string> labels;
-            for (const Candidate& candidate : candidates_) {
-                char buffer[96];
-                std::snprintf(buffer, sizeof(buffer), "%s+0x%llX", candidate.label.c_str(),
-                              static_cast<unsigned long long>(candidate.address));
-                labels.push_back(buffer);
-            }
+            for (const Candidate& candidate : candidates_)
+                labels.push_back(candidate.label);
 
             std::vector<const char*> items;
             for (const std::string& label : labels)
